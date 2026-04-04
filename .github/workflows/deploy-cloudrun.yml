@@ -1,0 +1,33 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCLOUD_PROJECT }}
+          service_account_key: ${{ secrets.GCLOUD_SA_KEY }}
+      - name: Build ml image
+        run: |
+          gcloud builds submit --tag gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-ml:$GITHUB_SHA . -q
+      - name: Deploy ml to Cloud Run
+        id: deploy-ml
+        run: |
+          gcloud run deploy bullforce-ml --image gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-ml:$GITHUB_SHA --region ${GCP_REGION:-us-central1} --platform managed --allow-unauthenticated --set-env-vars "API_TOKENS=${{ secrets.INFERENCE_SERVICE_TOKEN }},INFERENCE_JWT_SECRET=${{ secrets.INFERENCE_JWT_SECRET }},ALLOWED_ORIGINS=${{ secrets.ALLOWED_ORIGINS }}" --quiet
+      - name: Get ml service URL
+        id: get-ml-url
+        run: |
+          ML_URL=$(gcloud run services describe bullforce-ml --platform managed --region ${GCP_REGION:-us-central1} --format "value(status.url)")
+          echo "ML_URL=$ML_URL" >> $GITHUB_ENV
+      - name: Build web image
+        run: |
+          gcloud builds submit --tag gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-web:$GITHUB_SHA . -q
+      - name: Deploy web to Cloud Run with ML env
+        run: |
+          gcloud run deploy bullforce-web --image gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-web:$GITHUB_SHA --region ${GCP_REGION:-us-central1} --platform managed --allow-unauthenticated --set-env-vars "INFERENCE_URL=${{ env.ML_URL }},INFERENCE_SERVICE_TOKEN=${{ secrets.INFERENCE_SERVICE_TOKEN }},NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }},CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},STRIPE_SECRET=${{ secrets.STRIPE_SECRET }},SENTRY_DSN=${{ secrets.SENTRY_DSN }}" --quiet

@@ -1,0 +1,74 @@
+name: Train and Publish Model
+
+on:
+  schedule:
+    - cron: '30 3 * * *' # daily at 03:30 UTC
+  workflow_dispatch: {}
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f ml/requirements.txt ]; then pip install -r ml/requirements.txt; fi
+
+      - name: Run training script
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          if [ -f ml/train.py ]; then python ml/train.py; else echo "No training script found"; fi
+
+      - name: Evaluate model artifact
+        id: eval
+        run: |
+          echo "Checking for model artifacts..."
+          ls -la models || true
+          if compgen -G "models/*.joblib" > /dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No model artifact found; failing evaluation"; exit 1
+          fi
+
+      - name: Configure AWS (optional)
+        if: ${{ secrets.AWS_ACCESS_KEY_ID && secrets.AWS_SECRET_ACCESS_KEY && secrets.S3_BUCKET }}
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Upload model to S3 (optional)
+        if: ${{ steps.eval.outputs.found == 'true' && secrets.AWS_ACCESS_KEY_ID && secrets.AWS_SECRET_ACCESS_KEY && secrets.S3_BUCKET }}
+        run: |
+          for f in models/*.joblib models/*.pkl models/*.bin || true; do
+            if [ -f "$f" ]; then aws s3 cp "$f" s3://${{ secrets.S3_BUCKET }}/models/; fi
+          done
+
+      - name: Notify model deploy webhook (optional)
+        if: ${{ secrets.MODEL_DEPLOY_WEBHOOK }}
+        env:
+          WEBHOOK: ${{ secrets.MODEL_DEPLOY_WEBHOOK }}
+          MODEL_NAME: ${{ github.ref_name || github.sha }}
+        run: |
+          echo "Notifying deploy webhook"
+          curl -X POST -H "Content-Type: application/json" -d "{\"model\":\"${MODEL_NAME}\",\"source\":\"github-actions\"}" "$WEBHOOK"
+
+      - name: Run backtest evaluation (optional)
+        if: ${{ secrets.BACKTEST_API_URL && steps.eval.outputs.found == 'true' }}
+        env:
+          BACKTEST_URL: ${{ secrets.BACKTEST_API_URL }}
+          SYMBOL: ${{ secrets.BACKTEST_SYMBOL || 'INFY.NS' }}
+        run: |
+          echo "Running backtest evaluation against $BACKTEST_URL for $SYMBOL"
+          curl -s -X POST "$BACKTEST_URL" -H "Content-Type: application/json" -d "{\"symbols\":[\"${SYMBOL}\"],\"mode\":\"signal\",\"startingCapital\":100000,\"riskPerTradePct\":0.01}" | jq || true

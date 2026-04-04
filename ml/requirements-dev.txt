@@ -1,0 +1,9 @@
+fastapi
+httpx
+boto3
+prometheus-client
+sentry-sdk
+pytest
+pytest-asyncio
+pydantic
+# dev extras for inference tests and local FastAPI testing

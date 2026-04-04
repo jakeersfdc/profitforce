@@ -1,0 +1,36 @@
+name: Deploy Inference Service to Cloud Run
+
+on:
+  push:
+    paths:
+      - 'ml/api/**'
+      - '.github/workflows/deploy-fastapi-cloudrun.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t gcr.io/${{ secrets.GCP_PROJECT }}/bullforce-inference:${{ github.sha }} ./ml/api
+          echo "Pushing image..."
+          docker push gcr.io/${{ secrets.GCP_PROJECT }}/bullforce-inference:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy bullforce-inference \
+            --image gcr.io/${{ secrets.GCP_PROJECT }}/bullforce-inference:${{ github.sha }} \
+            --region ${{ secrets.GCP_REGION || 'us-central1' }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars MODEL_PATH=/app/models/current_model.joblib,SENTRY_DSN=${{ secrets.SENTRY_DSN }}

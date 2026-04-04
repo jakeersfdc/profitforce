@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT,
+  capital NUMERIC DEFAULT 100000,
+  risk_per_trade_pct NUMERIC DEFAULT 0.02,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);

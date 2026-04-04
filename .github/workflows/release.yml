@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web
+        run: |
+          docker build -f Dockerfile.web -t ${{ github.repository_owner }}/bullforce-web:${{ github.ref_name }} .
+
+      - name: Build ml
+        run: |
+          docker build -f Dockerfile.ml -t ${{ github.repository_owner }}/bullforce-ml:${{ github.ref_name }} .
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bullforce-ml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bullforce-ml
+  template:
+    metadata:
+      labels:
+        app: bullforce-ml
+    spec:
+      containers:
+        - name: ml
+          image: REPLACE_WITH_REGISTRY/bullforce:ml-latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_PATH
+              value: /app/models/current_model.joblib
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models-pvc

@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f8fafc;
+  --foreground: #171717;
+  --bf-bg-dark: #040915; /* near-black */
+  --bf-bg-deep: #021426; /* deep navy */
+  --bf-accent: #0ea5a4; /* teal accent */
+  --bf-muted: #94a3b8;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: var(--bf-bg-dark);
+    --foreground: #e6eef8;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Sidebar visuals for trading-dark theme */
+.bf-sidebar {
+  background: linear-gradient(180deg, var(--bf-bg-deep) 0%, rgba(2,20,38,1) 45%, var(--bf-bg-dark) 100%);
+  color: var(--foreground);
+}
+
+.bf-sidebar a {
+  color: inherit;
+}
+
+.bf-sidebar .nav-item:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.bf-active {
+  background: linear-gradient(90deg, rgba(14,165,164,0.08), rgba(14,165,164,0.02));
+  border-left: 3px solid var(--bf-accent);
+}
+
+/* Utility tweaks */
+.bf-shadow {
+  box-shadow: 0 6px 18px rgba(2,6,23,0.6);
+}

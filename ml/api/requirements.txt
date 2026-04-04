@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+joblib
+boto3
+numpy
+scikit-learn
+prometheus_client
+sentry-sdk
+watchdog

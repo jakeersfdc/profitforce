@@ -1,0 +1,15 @@
+# Normalize line endings and treat Python as LF
+* text=auto
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+
+# Do not attempt to normalise binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.tar.gz binary

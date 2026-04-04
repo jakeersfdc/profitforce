@@ -1,0 +1,25 @@
+name: Build Mobile App (CI)
+
+on:
+  push:
+    paths:
+      - 'mobile/**'
+  workflow_dispatch: {}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Install dependencies
+        working-directory: ./mobile
+        run: |
+          npm ci
+      - name: Run Expo Prebuild (validation)
+        working-directory: ./mobile
+        run: |
+          npx expo prebuild --no-install || true

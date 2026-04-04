@@ -1,0 +1,92 @@
+name: EAS Build & Attach to Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  eas-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          npm install -g eas-cli
+
+      - name: Expo login
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then echo "EXPO_TOKEN not set"; exit 1; fi
+          eas login --token "$EXPO_TOKEN"
+
+      - name: Start EAS builds
+        id: start_builds
+        run: |
+          set -e
+          echo "Starting Android build..."
+          ANDROID_OUT=$(eas build --platform android --non-interactive --profile production --json)
+          echo "$ANDROID_OUT" > android.json
+          ANDROID_ID=$(jq -r '.id' android.json)
+          echo "android_id=$ANDROID_ID" >> $GITHUB_OUTPUT
+
+          echo "Starting iOS build..."
+          IOS_OUT=$(eas build --platform ios --non-interactive --profile production --json) || true
+          echo "$IOS_OUT" > ios.json
+          IOS_ID=$(jq -r '.id' ios.json || echo "")
+          echo "ios_id=$IOS_ID" >> $GITHUB_OUTPUT
+
+      - name: Download build artifacts
+        id: download_artifacts
+        run: |
+          set -e
+          ANDROID_ID=${{ steps.start_builds.outputs.android_id }}
+          IOS_ID=${{ steps.start_builds.outputs.ios_id }}
+
+          if [ -n "$ANDROID_ID" ] && [ "$ANDROID_ID" != "null" ]; then
+            echo "Downloading Android artifact for build $ANDROID_ID"
+            eas build:download --id "$ANDROID_ID" --platform android --output ./android.apk
+          else
+            echo "No Android build id found; skipping Android download."
+          fi
+
+          if [ -n "$IOS_ID" ] && [ "$IOS_ID" != "null" ]; then
+            echo "Downloading iOS artifact for build $IOS_ID"
+            eas build:download --id "$IOS_ID" --platform ios --output ./ios.tar.gz
+          else
+            echo "No iOS build id found; skipping iOS download."
+          fi
+
+      - name: Attach Android APK to Release
+        if: always() && exists('./android.apk')
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./android.apk
+          asset_name: android-${{ github.event.release.tag_name }}.apk
+          asset_content_type: application/vnd.android.package-archive
+
+      - name: Extract and attach iOS IPA to Release
+        if: always() && exists('./ios.tar.gz')
+        run: |
+          mkdir -p ios_artifact
+          tar -xzf ios.tar.gz -C ios_artifact || true
+          IPA=$(find ios_artifact -name '*.ipa' | head -n1 || true)
+          if [ -n "$IPA" ]; then
+            echo "Found IPA: $IPA"
+            gh release upload "${{ github.event.release.tag_name }}" "$IPA" --clobber
+          else
+            echo "No .ipa found inside ios.tar.gz; skipping upload."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

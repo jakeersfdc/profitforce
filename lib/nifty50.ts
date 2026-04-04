@@ -1,0 +1,33 @@
+export const NIFTY50 = [
+  'RELIANCE.NS',
+  'TCS.NS',
+  'HDFCBANK.NS',
+  'INFY.NS',
+  'ICICIBANK.NS',
+  'HINDUNILVR.NS',
+  'KOTAKBANK.NS',
+  'SBIN.NS',
+  'HDFC.NS',
+  'LT.NS',
+  'AXISBANK.NS',
+  'ITC.NS',
+  'BHARTIARTL.NS',
+  'BAJFINANCE.NS',
+  'MARUTI.NS',
+  'ASIANPAINT.NS',
+  'TITAN.NS',
+  'SUNPHARMA.NS',
+  'ONGC.NS',
+  'ULTRACEMCO.NS',
+  'POWERGRID.NS',
+  'NTPC.NS',
+  'DIVISLAB.NS',
+  'EICHERMOT.NS',
+  'WIPRO.NS',
+  'DRREDDY.NS',
+  'GRASIM.NS',
+  'BRITANNIA.NS',
+  'COALINDIA.NS'
+];
+
+export const INDICES = ['^NSEI', '^BSESN', '^NSEBANK'];

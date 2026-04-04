@@ -1,0 +1,43 @@
+{
+  "name": "bullforce-signals",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "migrate": "node scripts/run_migrations.js",
+    "train:all": "node scripts/train_all.js",
+    "train:schedule": "node scripts/schedule_train.js",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^7.0.8",
+    "date-fns": "^4.1.0",
+    "firebase-admin": "^11.10.0",
+    "lightweight-charts": "^4.0.0",
+    "lucide-react": "^1.7.0",
+    "next": "16.2.2",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^2.7.0",
+    "nodemailer": "^6.9.4",
+    "pg": "^8.11.0",
+    "jsonwebtoken": "^9.0.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "stripe": "^11.0.0",
+    "technicalindicators": "^3.1.0",
+    "yahoo-finance2": "^3.14.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/node-fetch": "^2.6.13",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.2",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

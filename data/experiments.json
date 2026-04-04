@@ -1,0 +1,9 @@
+{
+  "experiments": [
+    {
+      "id": "exp1",
+      "models": ["example"],
+      "weights": {"example": 1}
+    }
+  ]
+}
