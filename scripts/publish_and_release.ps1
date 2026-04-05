@@ -32,7 +32,8 @@ if ($Repo) {
     } else {
         Write-Host "Repo $Repo exists; ensuring 'origin' remote is set."
         git remote remove origin 2>$null
-        git remote add origin "git@github.com:$Repo.git" 2>$null
+        # prefer HTTPS remote to avoid SSH key issues on developer machines
+        git remote add origin "https://github.com/$Repo.git" 2>$null
     }
 }
 
@@ -56,7 +57,7 @@ $secrets = @(
     'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
     'DATABASE_URL',
     'JWT_SECRET',
-    'STRIPE_SECRET',
+    'STRIPE_SECRET_KEY',
     'STRIPE_WEBHOOK_SECRET',
     'NEXT_PUBLIC_STRIPE_PRICE_ID',
     'ADMIN_USERS',
@@ -64,7 +65,7 @@ $secrets = @(
     'NEXT_PUBLIC_MOBILE_SCHEME',
     'SENTRY_DSN',
     'GCLOUD_PROJECT',
-    'GCLOUD_SA_KEY'
+    'GCLOUD_SERVICE_KEY'
 )
 
 Write-Host "Setting recommended GitHub secrets from environment variables or .publish_secrets.env"
@@ -79,6 +80,21 @@ if (Test-Path $envFile) {
         }
     }
     Write-Host "Loaded .publish_secrets.env"
+}
+
+# Normalize common alternative secret names so users can use slightly different keys
+# e.g., allow CLERK_PUBLISHABLE_KEY -> NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+if (-not [Environment]::GetEnvironmentVariable('NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY')) {
+    $alt = [Environment]::GetEnvironmentVariable('CLERK_PUBLISHABLE_KEY')
+    if ($alt) { [Environment]::SetEnvironmentVariable('NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY', $alt) }
+}
+if (-not [Environment]::GetEnvironmentVariable('STRIPE_SECRET_KEY')) {
+    $alt = [Environment]::GetEnvironmentVariable('STRIPE_SECRET')
+    if ($alt) { [Environment]::SetEnvironmentVariable('STRIPE_SECRET_KEY', $alt) }
+}
+if (-not [Environment]::GetEnvironmentVariable('GCLOUD_SERVICE_KEY')) {
+    $alt = [Environment]::GetEnvironmentVariable('GCLOUD_SA_KEY')
+    if ($alt) { [Environment]::SetEnvironmentVariable('GCLOUD_SERVICE_KEY', $alt) }
 }
 
 if (-not $SkipSecrets) {
