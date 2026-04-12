@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import SignalTable from '../../components/SignalTable';
 import SuperCharts from '../../components/SuperCharts';
 
@@ -20,6 +20,7 @@ export default function DashboardClient() {
   const [marketStatus, setMarketStatus] = useState('Checking market status...');
   const [isMarketOpen, setIsMarketOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [lastRefresh, setLastRefresh] = useState<string>('');
 
   const [signals, setSignals] = useState<any[]>([]);
   const [signalsLoading, setSignalsLoading] = useState(true);
@@ -49,69 +50,145 @@ export default function DashboardClient() {
   const [modelInfoLoading, setModelInfoLoading] = useState(false);
   const [modelInfoCheckedAt, setModelInfoCheckedAt] = useState<string | null>(null);
   const [expandedBacktests, setExpandedBacktests] = useState<Record<string, boolean>>({});
+  const [autoTradeEnabled, setAutoTradeEnabled] = useState(false);
+  const [positions, setPositions] = useState<any[]>([]);
+  const autoTradeTimer = useRef<any>(null);
+  const streamRef = useRef<EventSource | null>(null);
+  const reconnectTimer = useRef<any>(null);
+  const prevPricesRef = useRef<Record<string, number>>({});
+  const [priceFlash, setPriceFlash] = useState<Record<string, 'up' | 'down' | null>>({});
 
-  const fetchRealIndices = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/indices', { cache: 'no-store' });
-      const json = await res.json();
-      const fresh = json?.indices ?? json?.data ?? [];
-      const updated = allIndices.map((idx) => {
-        const found = fresh.find((f: any) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id);
-        return {
-          ...idx,
-          price: found?.price != null ? Number(found.price) : idx.price,
-          change: found?.change != null ? Number(found.change) : idx.change,
-        };
+  // ── Real-time SSE stream (indices every 3s, signals every 10s) ──
+  useEffect(() => {
+    let retryDelay = 1000;
+
+    const connect = () => {
+      if (streamRef.current) { try { streamRef.current.close(); } catch {} }
+
+      const es = new EventSource('/api/stream');
+      streamRef.current = es;
+
+      es.addEventListener('indices', (ev) => {
+        try {
+          const { indices: fresh, ts } = JSON.parse(ev.data);
+
+          // Detect price changes for flash animation
+          const flashes: Record<string, 'up' | 'down' | null> = {};
+          for (const f of (fresh ?? [])) {
+            const key = f.id || f.sym;
+            const prev = prevPricesRef.current[key];
+            if (prev != null && f.price != null && f.price !== prev) {
+              flashes[key] = f.price > prev ? 'up' : 'down';
+            }
+            if (f.price != null) prevPricesRef.current[key] = f.price;
+          }
+          if (Object.keys(flashes).length > 0) {
+            setPriceFlash(flashes);
+            setTimeout(() => setPriceFlash({}), 600); // clear flash after 600ms
+          }
+
+          setAllIndices(prev => prev.map((idx) => {
+            const found = (fresh ?? []).find((f: any) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id);
+            return {
+              ...idx,
+              price: found?.price != null ? Number(found.price) : idx.price,
+              change: found?.change != null ? Number(found.change) : idx.change,
+            };
+          }));
+
+          // Market hours detection
+          const now = new Date(ts);
+          const istOffset = 5.5 * 60;
+          const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+          const istMinutes = utcMinutes + istOffset;
+          const istHour = Math.floor(istMinutes / 60) % 24;
+          const istMin = istMinutes % 60;
+          const dayOfWeek = now.getUTCDay();
+          const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+          const mktOpen = isWeekday && ((istHour === 9 && istMin >= 15) || (istHour > 9 && istHour < 15) || (istHour === 15 && istMin <= 30));
+
+          const anyLive = (fresh ?? []).some((u: any) => u.price != null && u.price !== 0);
+          if (anyLive) {
+            if (mktOpen) {
+              setMarketStatus('🟢 Market Open — Live Streaming (every 3s)');
+              setIsMarketOpen(true);
+            } else {
+              setMarketStatus('🟡 Data Available — Market Closed');
+              setIsMarketOpen(false);
+            }
+          } else {
+            setMarketStatus('🔴 Market Closed (Weekend / Holiday)');
+            setIsMarketOpen(false);
+          }
+          setLastRefresh(new Date(ts).toLocaleTimeString());
+          setLoading(false);
+        } catch {}
       });
-      setAllIndices(updated);
 
-      const anyLive = updated.some((u) => u.price != null && u.price !== 0);
-      if (anyLive) {
-        setMarketStatus('✅ Market Open - Live Data');
-        setIsMarketOpen(true);
-      } else {
-        setMarketStatus('❌ Market Closed (Weekend / Holiday)');
-        setIsMarketOpen(false);
-      }
-    } catch (err) {
-      console.error('Market fetch failed', err);
-      setMarketStatus('❌ Market Closed (Weekend / Holiday)');
-      setIsMarketOpen(false);
-    } finally {
-      setLoading(false);
-    }
-  };
+      es.addEventListener('signals', (ev) => {
+        try {
+          const { results } = JSON.parse(ev.data);
+          setSignals(results ?? []);
+          setSignalsLoading(false);
+        } catch {}
+      });
 
-  useEffect(() => {
-    fetchRealIndices();
-    const interval = setInterval(() => {
-      if (isMarketOpen) fetchRealIndices();
-    }, 45000);
-    return () => clearInterval(interval);
-  }, [isMarketOpen]);
+      es.addEventListener('connected', () => {
+        retryDelay = 1000; // reset backoff on successful connect
+      });
 
-  const fetchSignals = async () => {
-    setSignalsLoading(true);
-    try {
-      const res = await fetch('/api/scan', { cache: 'no-store' });
-        const json = await res.json();
-        // prefer full scan results (`all`) so the dashboard shows HOLD and actionable signals
-        const results = json?.all ?? json?.results ?? [];
-        setSignals(results);
-    } catch (err) {
-      console.error('Failed to fetch signals', err);
-      setToast({ message: 'Failed to fetch signals', type: 'error' });
-    } finally {
-      setSignalsLoading(false);
-    }
-  };
+      es.onerror = () => {
+        es.close();
+        streamRef.current = null;
+        // Reconnect with exponential backoff (max 10s)
+        reconnectTimer.current = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 1.5, 10000);
+          connect();
+        }, retryDelay);
+      };
+    };
 
-  useEffect(() => {
-    fetchSignals();
-    const id = setInterval(fetchSignals, 60000);
-    return () => clearInterval(id);
+    connect();
+
+    return () => {
+      if (streamRef.current) { try { streamRef.current.close(); } catch {} }
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
   }, []);
+
+  // Auto-trade toggle
+  useEffect(() => {
+    if (!autoTradeEnabled) {
+      if (autoTradeTimer.current) clearInterval(autoTradeTimer.current);
+      return;
+    }
+    const runCycle = async () => {
+      try {
+        const res = await fetch('/api/trade/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'full' }) });
+        const json = await res.json();
+        if (json.newSignals?.length) setToast({ message: `Auto: ${json.newSignals.length} new signals, ${json.alertsSent} alerts sent`, type: 'success' });
+        if (json.exits?.length) setToast({ message: `Auto: ${json.exits.length} positions exited`, type: 'info' });
+      } catch (e) { console.error('auto-trade cycle failed', e); }
+    };
+    runCycle();
+    autoTradeTimer.current = setInterval(runCycle, 60000); // run every 60s
+    return () => { if (autoTradeTimer.current) clearInterval(autoTradeTimer.current); };
+  }, [autoTradeEnabled]);
+
+  // Fetch positions
+  const fetchPositions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trade/auto', { cache: 'no-store' });
+      const json = await res.json();
+      setPositions(json?.positions ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    fetchPositions();
+    const id = setInterval(fetchPositions, 10000); // 10s for positions
+    return () => clearInterval(id);
+  }, [fetchPositions]);
 
   const fetchModels = async () => {
     setModelsLoading(true);
@@ -251,9 +328,18 @@ export default function DashboardClient() {
     entryPrice: s.entryPrice ?? null,
     stopLoss: s.stopLoss ?? null,
     targetPrice: s.targetPrice ?? null,
+    trailingStop: s.trailingStop ?? null,
     strength: s.strength ?? 0,
+    confidence: s.confidence ?? 0,
     reason: s.reason ?? '',
-  }));
+    fnoRecommendation: s.fnoRecommendation ?? null,
+    indicators: s.indicators ?? null,
+    timestamp: s.timestamp ?? null,
+  })).sort((a, b) => {
+    // Sort by strength desc, then confidence desc
+    if (b.strength !== a.strength) return b.strength - a.strength;
+    return b.confidence - a.confidence;
+  });
 
   // actionable signals only (ready to BUY / SELL / EXIT)
   const actionableSignals = displaySignals.filter((d) => ['BUY', 'SELL', 'EXIT'].includes(String(d.signal).toUpperCase()));
@@ -335,12 +421,19 @@ export default function DashboardClient() {
       const url = `/api/optionchain?symbol=${encodeURIComponent(selectedSignal.symbol)}&side=${encodeURIComponent(side ?? optionSide)}&targetDelta=${encodeURIComponent(String(delta ?? targetDelta))}&maxPremium=${encodeURIComponent(String(maxP ?? maxPremium))}&days=${encodeURIComponent(String(days ?? daysToExpiry))}`;
       const resp = await fetch(url);
       const json = await resp.json();
-      setOptionBest(json?.best ?? null);
-      setOptionCandidates(json?.candidates ?? null);
+      if (json?.error) {
+        setOptionBest(null);
+        setOptionCandidates(null);
+        setToast({ message: `Option chain: ${json.error}`, type: 'error' });
+      } else {
+        setOptionBest(json?.best ?? null);
+        setOptionCandidates(json?.candidates ?? null);
+      }
     } catch (e) {
       console.error('optionchain query failed', e);
       setOptionBest(null);
       setOptionCandidates(null);
+      setToast({ message: 'Failed to fetch option chain', type: 'error' });
     } finally {
       setOptionLoading(false);
     }
@@ -355,14 +448,23 @@ export default function DashboardClient() {
   return (
     <div className="p-6 space-y-8">
       <div className="flex items-center justify-between">
-        <div className={`text-left py-3 rounded-2xl font-medium text-lg flex-1 ${isMarketOpen ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+        <div className={`text-left py-3 px-4 rounded-2xl font-medium text-lg flex-1 ${isMarketOpen ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
           {marketStatus}
+          {lastRefresh && <span className="text-xs ml-3 opacity-60">Last: {lastRefresh}</span>}
         </div>
-        <div className="ml-4 text-right">
-          <button onClick={() => document.getElementById('models-panel')?.scrollIntoView({ behavior: 'smooth' })} className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${modelInfo?.model_loaded ? 'bg-emerald-400 text-black' : modelInfo ? 'bg-rose-400 text-black' : 'bg-gray-500 text-white'}`}>
-            {modelInfo?.model_loaded ? 'Model: Loaded' : modelInfo ? 'Model: None' : 'Model: Unknown'}
-          </button>
-          <div className="text-xs text-[--bf-muted] mt-1">{modelInfoCheckedAt ? `Checked ${new Date(modelInfoCheckedAt).toLocaleTimeString()}` : 'Not checked'}</div>
+        <div className="ml-4 flex items-center gap-3">
+          <div className="text-center">
+            <button onClick={() => setAutoTradeEnabled(!autoTradeEnabled)} className={`px-4 py-2 rounded-full text-sm font-bold ${autoTradeEnabled ? 'bg-emerald-500 text-black animate-pulse' : 'bg-gray-600 text-white'}`}>
+              {autoTradeEnabled ? '⚡ Auto-Trade ON' : '◻ Auto-Trade OFF'}
+            </button>
+            {positions.length > 0 && <div className="text-xs text-emerald-400 mt-1">{positions.length} open position{positions.length > 1 ? 's' : ''}</div>}
+          </div>
+          <div className="text-right">
+            <button onClick={() => document.getElementById('models-panel')?.scrollIntoView({ behavior: 'smooth' })} className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${modelInfo?.model_loaded ? 'bg-emerald-400 text-black' : modelInfo ? 'bg-rose-400 text-black' : 'bg-gray-500 text-white'}`}>
+              {modelInfo?.model_loaded ? 'Model: Loaded' : modelInfo ? 'Model: None' : 'Model: Unknown'}
+            </button>
+            <div className="text-xs text-[--bf-muted] mt-1">{modelInfoCheckedAt ? `Checked ${new Date(modelInfoCheckedAt).toLocaleTimeString()}` : 'Not checked'}</div>
+          </div>
         </div>
       </div>
 
@@ -374,10 +476,11 @@ export default function DashboardClient() {
             .map((idx, i) => {
               const isUp = idx.change != null && idx.change >= 0;
               const points = idx.price != null && idx.change != null ? (idx.price * idx.change) / 100 : null;
+              const flash = priceFlash[idx.id ?? idx.sym];
               return (
-                <div key={i} className={`text-center p-8 rounded-3xl border ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/8' : 'border-rose-600 bg-gradient-to-br from-rose-900/8'}`}>
+                <div key={i} className={`text-center p-8 rounded-3xl border transition-all duration-300 ${flash === 'up' ? 'ring-2 ring-emerald-400 bg-emerald-900/20' : flash === 'down' ? 'ring-2 ring-rose-400 bg-rose-900/20' : ''} ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/8' : 'border-rose-600 bg-gradient-to-br from-rose-900/8'}`}>
                   <div className="text-sm text-[--bf-muted] mb-2">{idx.name}</div>
-                  <div className={`text-4xl font-extrabold ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
+                  <div className={`text-4xl font-extrabold tabular-nums transition-colors duration-300 ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
                   <div className={`text-lg mt-2 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>
                     {idx.change != null ? (isUp ? '↑' : '↓') : ''} {idx.change != null ? `${idx.change.toFixed(2)}%` : ''} {points != null ? `(${isUp ? '+' : ''}${points.toFixed(2)} pts)` : ''}
                   </div>
@@ -393,10 +496,11 @@ export default function DashboardClient() {
             .map((idx, i) => {
               const isUp = idx.change != null && idx.change >= 0;
               const points = idx.price != null && idx.change != null ? (idx.price * idx.change) / 100 : null;
+              const flash = priceFlash[idx.id ?? idx.sym];
               return (
-                <div key={i} className={`text-center p-6 rounded-2xl border ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/6' : 'border-rose-600 bg-gradient-to-br from-rose-900/6'}`}>
+                <div key={i} className={`text-center p-6 rounded-2xl border transition-all duration-300 ${flash === 'up' ? 'ring-2 ring-emerald-400 bg-emerald-900/20' : flash === 'down' ? 'ring-2 ring-rose-400 bg-rose-900/20' : ''} ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/6' : 'border-rose-600 bg-gradient-to-br from-rose-900/6'}`}>
                   <div className="text-sm text-[--bf-muted] mb-1">{idx.name}</div>
-                  <div className={`text-3xl font-bold ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
+                  <div className={`text-3xl font-bold tabular-nums transition-colors duration-300 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
                   <div className={`text-sm mt-1 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>
                     {idx.change != null ? (isUp ? '↑' : '↓') : ''} {idx.change != null ? `${idx.change.toFixed(2)}%` : ''} {points != null ? `(${isUp ? '+' : ''}${points.toFixed(2)} pts)` : ''}
                   </div>
@@ -406,7 +510,18 @@ export default function DashboardClient() {
         </div>
       </div>
 
-      <div className="text-center text-gray-400 text-sm">Note: Real live data is only available during market hours (9:15 AM - 3:30 PM IST, Monday to Friday)</div>
+      <div className="text-center text-gray-400 text-sm">
+        {isMarketOpen ? 'Live streaming — Indices every 3s, Signals every 10s' : 'Showing last available close prices'}
+        <button onClick={() => {
+          // Force reconnect SSE for instant refresh
+          if (streamRef.current) { try { streamRef.current.close(); } catch {} streamRef.current = null; }
+          const es = new EventSource('/api/stream');
+          streamRef.current = es;
+          es.addEventListener('indices', (ev: any) => { try { const { indices: fresh, ts } = JSON.parse(ev.data); setAllIndices((prev: any[]) => prev.map((idx: any) => { const found = (fresh ?? []).find((f: any) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id); return { ...idx, price: found?.price != null ? Number(found.price) : idx.price, change: found?.change != null ? Number(found.change) : idx.change }; })); setLastRefresh(new Date(ts).toLocaleTimeString()); setLoading(false); } catch {} });
+          es.addEventListener('signals', (ev: any) => { try { const { results } = JSON.parse(ev.data); setSignals(results ?? []); setSignalsLoading(false); } catch {} });
+          es.onerror = () => { es.close(); };
+        }} className="ml-3 px-2 py-1 rounded bg-white/10 text-xs">↻ Refresh Now</button>
+      </div>
 
       <div className="space-y-6">
         <div className="flex items-center justify-between">
@@ -460,6 +575,30 @@ export default function DashboardClient() {
             ))}
           </div>
         </div>
+
+        {/* Open Positions */}
+        {positions.length > 0 && (
+          <div className="mt-6">
+            <h3 className="text-md font-semibold">Open Positions ({positions.length})</h3>
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="text-left text-[--bf-muted]"><th className="py-2">Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Qty</th></tr></thead>
+                <tbody>
+                  {positions.map((p: any, i: number) => (
+                    <tr key={i} className="border-t border-[#0f1724]">
+                      <td className="py-2 font-medium">{p.symbol}</td>
+                      <td className={`py-2 ${p.side === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}`}>{p.side}</td>
+                      <td className="py-2">₹{Number(p.entryPrice).toFixed(2)}</td>
+                      <td className="py-2 text-rose-400">₹{Number(p.stopLoss).toFixed(2)}</td>
+                      <td className="py-2 text-emerald-400">₹{Number(p.targetPrice).toFixed(2)}</td>
+                      <td className="py-2">{p.qty}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
         <div id="models-panel" className="mt-6">
           <h3 className="text-md font-semibold">Models</h3>
@@ -549,33 +688,56 @@ export default function DashboardClient() {
                   <div className="text-sm mt-3 text-[--bf-muted]">{selectedSignal.reason}</div>
                   <div className="mt-4">
                     <div className="text-sm text-[--bf-muted] mb-2">Option Finder</div>
-                    <div className="flex gap-2 items-center">
-                      <select value={optionSide} onChange={(e) => setOptionSide(e.target.value as any)} className="px-2 py-1 bg-[#0b1220] rounded text-white">
-                        <option value="CALL">CALL</option>
-                        <option value="PUT">PUT</option>
-                      </select>
-                      <input type="number" step="0.05" value={targetDelta} onChange={(e) => setTargetDelta(Number(e.target.value))} className="px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      <input type="number" value={maxPremium} onChange={(e) => setMaxPremium(Number(e.target.value))} className="px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      <input type="number" value={daysToExpiry} onChange={(e) => setDaysToExpiry(Number(e.target.value))} className="px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      <button onClick={() => queryOptionChain(optionSide, targetDelta, maxPremium, daysToExpiry)} className="px-3 py-1 rounded bg-emerald-500 text-black font-semibold">Find Best Strike</button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-xs text-[--bf-muted] block mb-1">Side</label>
+                        <select value={optionSide} onChange={(e) => setOptionSide(e.target.value as any)} className="w-full px-2 py-1 bg-[#0b1220] rounded text-white">
+                          <option value="CALL">CALL</option>
+                          <option value="PUT">PUT</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-[--bf-muted] block mb-1">Target Delta</label>
+                        <input type="number" step="0.05" value={targetDelta} onChange={(e) => setTargetDelta(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-[--bf-muted] block mb-1">Max Premium (₹)</label>
+                        <input type="number" value={maxPremium} onChange={(e) => setMaxPremium(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-[--bf-muted] block mb-1">Days to Expiry</label>
+                        <input type="number" value={daysToExpiry} onChange={(e) => setDaysToExpiry(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
+                      </div>
                     </div>
+                    <button onClick={() => queryOptionChain(optionSide, targetDelta, maxPremium, daysToExpiry)} className="mt-2 w-full px-3 py-2 rounded bg-emerald-500 text-black font-semibold">Find Best Strike</button>
                     {optionLoading && <div className="text-sm text-[--bf-muted] mt-2">Searching options…</div>}
                     {optionBest && (
-                      <div className="mt-3 p-2 bg-black/10 rounded">
-                        <div className="text-sm">Best: <strong>{optionBest.strike}</strong> — Premium: {optionBest.lastPrice}</div>
-                        <div className="text-xs text-[--bf-muted]">Delta: {optionBest.delta?.toFixed(3)} IV: {optionBest.iv?.toFixed(3)} Days: {Math.round(optionBest.days ?? 0)}</div>
+                      <div className="mt-3 p-3 bg-emerald-950/50 border border-emerald-800/40 rounded">
+                        <div className="text-sm font-semibold">Best Strike: <strong className="text-lg text-emerald-400">₹{Number(optionBest.strike).toLocaleString()}</strong>
+                          {optionBest.type && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-white/10">{optionBest.type}</span>}
+                          {optionBest.synthetic && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300">Calculated</span>}
+                        </div>
+                        <div className="text-xs text-[--bf-muted] mt-1">Delta: {optionBest.delta?.toFixed(3)} | IV: {(optionBest.iv||0).toFixed(1)}% | Days: {Math.round(optionBest.days ?? 0)}{optionBest.lastPrice != null ? ` | Premium: ₹${optionBest.lastPrice}` : ''}</div>
                         <div className="mt-2">
-                          <button onClick={() => navigator.clipboard?.writeText(String(optionBest.strike))} className="px-2 py-1 rounded bg-white/10">Copy Strike</button>
+                          <button onClick={() => navigator.clipboard?.writeText(String(optionBest.strike))} className="px-2 py-1 rounded bg-white/10 text-xs">Copy Strike</button>
                         </div>
                       </div>
                     )}
-                    {optionCandidates && (
+                    {optionCandidates && optionCandidates.length > 0 && (
                       <div className="mt-3 max-h-48 overflow-y-auto text-sm">
                         <table className="w-full text-sm">
-                          <thead><tr className="text-[--bf-muted]"><th>strike</th><th>prem</th><th>delta</th><th>iv</th><th>days</th><th>score</th></tr></thead>
+                          <thead><tr className="text-[--bf-muted]"><th className="text-left px-2">Strike</th><th>Type</th><th>Premium</th><th>Delta</th><th>IV</th><th>Days</th><th>Score</th></tr></thead>
                           <tbody>
                             {optionCandidates.map((c: any, i: number) => (
-                              <tr key={i} className="border-t"><td className="px-2 py-1">{c.strike}</td><td className="px-2 py-1">{c.lastPrice}</td><td className="px-2 py-1">{c.delta?.toFixed(3)}</td><td className="px-2 py-1">{(c.iv||0).toFixed(3)}</td><td className="px-2 py-1">{Math.round(c.days||0)}</td><td className="px-2 py-1">{Number(c.score).toFixed(2)}</td></tr>
+                              <tr key={i} className={`border-t border-white/5 ${i === 0 ? 'bg-emerald-900/20' : ''}`}>
+                                <td className="px-2 py-1 font-mono font-semibold">₹{Number(c.strike).toLocaleString()}</td>
+                                <td className="px-2 py-1 text-center text-xs">{c.type ?? '—'}</td>
+                                <td className="px-2 py-1 text-center">{c.lastPrice != null ? `₹${c.lastPrice}` : '—'}</td>
+                                <td className="px-2 py-1 text-center">{c.delta?.toFixed(3)}</td>
+                                <td className="px-2 py-1 text-center">{((c.iv||0)*100).toFixed(1)}%</td>
+                                <td className="px-2 py-1 text-center">{Math.round(c.days||0)}</td>
+                                <td className="px-2 py-1 text-center">{Number(c.score).toFixed(1)}</td>
+                              </tr>
                             ))}
                           </tbody>
                         </table>

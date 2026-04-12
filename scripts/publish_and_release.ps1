@@ -7,7 +7,7 @@ Usage: .\scripts\publish_and_release.ps1 -Repo 'owner/repo' -Tag 'v0.1.0'
 #>
 
 param(
-    [string]$Repo = 'jakeersfdc/bullforce-signals',
+    [string]$Repo = 'jakeersfdc/ProfitForce-signals',
     [string]$Tag = '',
     [switch]$SkipSecrets
 )

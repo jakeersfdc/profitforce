@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Bullforce Signals",
-  description: "Trading signals and watchlist — Bullforce",
+  title: "ProfitForce Signals",
+  description: "Trading signals and watchlist — ProfitForce",
 };
 
 export default function RootLayout({

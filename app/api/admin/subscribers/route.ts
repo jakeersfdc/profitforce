@@ -10,7 +10,7 @@ function getDbClient() {
 }
 
 export async function middlewareAuth() {
-  const userId = requireUser();
+  const userId = await requireUser();
   if (!isAdmin(userId)) {
     throw new Error('forbidden');
   }
@@ -19,7 +19,7 @@ export async function middlewareAuth() {
 
 export async function GET(req: Request) {
   try {
-    middlewareAuth();
+    await middlewareAuth();
   } catch (e) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
@@ -37,7 +37,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    middlewareAuth();
+    await middlewareAuth();
   } catch (e) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
@@ -61,7 +61,7 @@ export async function POST(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    middlewareAuth();
+    await middlewareAuth();
   } catch (e) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }

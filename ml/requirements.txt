@@ -5,3 +5,5 @@ joblib
 yfinance
 ta
 PyJWT
+xgboost
+lightgbm

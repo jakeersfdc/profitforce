@@ -34,7 +34,7 @@ function ChartCard({ item }: { item: Item }) {
 
         // create chart
         chartRef.current?.remove();
-        const chart = createChart(ref.current!, { width: ref.current!.clientWidth, height: 260, layout: { backgroundColor: '#071026', textColor: '#9aa7bd' }, grid: { vertLines: { color: '#0b1220' }, horzLines: { color: '#0b1220' } }, rightPriceScale: { borderColor: '#0b1220' }, timeScale: { borderColor: '#0b1220' } });
+        const chart = createChart(ref.current!, { width: ref.current!.clientWidth, height: 260, layout: { background: { color: '#071026' }, textColor: '#9aa7bd' }, grid: { vertLines: { color: '#0b1220' }, horzLines: { color: '#0b1220' } }, rightPriceScale: { borderColor: '#0b1220' }, timeScale: { borderColor: '#0b1220' } });
         chartRef.current = chart;
         const line = chart.addLineSeries({ color: '#26a69a', lineWidth: 2, lineStyle: LineStyle.Solid });
         line.setData(data);

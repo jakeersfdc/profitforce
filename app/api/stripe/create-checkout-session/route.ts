@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET || '', { apiVersion: '2023-08-16' });
+const stripe = new Stripe(process.env.STRIPE_SECRET || '', { apiVersion: '2022-11-15' });
 
 export async function POST(req: Request) {
   if (!process.env.STRIPE_SECRET) {
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     // list by metadata is not supported in all stripe SDKs; list customers and filter as fallback
     const all = await stripe.customers.list({ limit: 100 });
     const existing = all.data.find(c => (c.metadata as any)?.clerk_id === clerk_id);
-    let customer = existing.data && existing.data[0];
+    let customer = existing || null;
     if (!customer) {
       customer = await stripe.customers.create({
         metadata: { clerk_id },

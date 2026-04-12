@@ -6,8 +6,11 @@ import fs from 'fs';
 
 export async function GET(req: Request) {
   try {
-    const { userId } = auth();
-    if (!userId) return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const { userId } = await auth();
+    // Allow unauthenticated access in development for local testing
+    if (!userId && process.env.NODE_ENV !== 'development') {
+      return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    }
     const url = new URL(req.url);
     const symbol = url.searchParams.get('symbol');
     const modelPath = url.searchParams.get('model') ?? `ml/models/${(symbol ?? 'model').replace('/', '_')}.joblib`;

@@ -13,7 +13,7 @@ Required environment variables (used in code):
 - `NEXT_PUBLIC_STRIPE_PRICE_ID` — Price ID used on the checkout page.
 - `ADMIN_USERS` — Comma-separated Clerk user IDs that should have admin access.
 - `NEXT_PUBLIC_APP_ORIGIN` — e.g. `https://app.example.com` (used in deep links and redirects).
-- `NEXT_PUBLIC_MOBILE_SCHEME` — e.g. `bullforce://` (deep-link scheme for Expo mobile app).
+- `NEXT_PUBLIC_MOBILE_SCHEME` — e.g. `ProfitForce://` (deep-link scheme for Expo mobile app).
 
 Optional / infra secrets:
 
@@ -43,11 +43,11 @@ Sample Cloud Run deploy (Linux / macOS / WSL):
 
 ```bash
 # build and push web image to Google Container Registry
-gcloud builds submit --tag gcr.io/$GCLOUD_PROJECT/bullforce-web:latest
+gcloud builds submit --tag gcr.io/$GCLOUD_PROJECT/ProfitForce-web:latest
 
 # deploy to Cloud Run
-gcloud run deploy bullforce-web \
-  --image gcr.io/$GCLOUD_PROJECT/bullforce-web:latest \
+gcloud run deploy ProfitForce-web \
+  --image gcr.io/$GCLOUD_PROJECT/ProfitForce-web:latest \
   --region us-central1 \
   --platform managed \
   --set-secrets "DATABASE_URL=${DATABASE_URL}" \
@@ -76,14 +76,14 @@ STRIPE_WEBHOOK_SECRET=whsec_...
 NEXT_PUBLIC_STRIPE_PRICE_ID=price_...
 ADMIN_USERS=clerkUserId1,clerkUserId2
 NEXT_PUBLIC_APP_ORIGIN=https://app.example.com
-NEXT_PUBLIC_MOBILE_SCHEME=bullforce://
+NEXT_PUBLIC_MOBILE_SCHEME=ProfitForce://
 SENTRY_DSN=https://...
 GCLOUD_PROJECT=your-gcloud-project-id
 GCLOUD_SA_KEY='{"type":"service_account",...}'
 EXPO_TOKEN=expo-...
 ```
 
-Then run the publish script in non-interactive mode (default repo is `jakeersfdc/bullforce-signals`):
+Then run the publish script in non-interactive mode (default repo is `jakeersfdc/ProfitForce-signals`):
 
 ```bash
 ./scripts/publish_and_release.sh --tag v0.1.0

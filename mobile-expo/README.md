@@ -14,7 +14,7 @@ Notes:
 Mobile OAuth & deep link notes
 
 1. Configure a web OAuth redirect in your Clerk application pointing to your app's deep link (e.g. `myapp://callback`) and also the web sign-in URL.
-2. In Expo, define a scheme in `app.json` or `app.config.js` (e.g. `scheme: "bullforce"`) and add the redirect to Clerk as `bullforce://callback`.
+2. In Expo, define a scheme in `app.json` or `app.config.js` (e.g. `scheme: "ProfitForce"`) and add the redirect to Clerk as `ProfitForce://callback`.
 3. Use the web-based OAuth flow: open the Clerk sign-in URL in `WebBrowser.openBrowserAsync()` (or `Linking.openURL`) and handle the redirect in `Linking.addEventListener('url', ...)` to capture the auth token or session transfer.
 
 Limitations: This scaffold only provides placeholders and open/redirect helpers. Full secure mobile auth requires backend session exchange to securely issue tokens to the mobile app. Ask me to implement the full flow and I will add the server-side handshake and deep-link handling.

@@ -17,11 +17,11 @@ jobs:
 
       - name: Build web
         run: |
-          docker build -f Dockerfile.web -t ${{ github.repository_owner }}/bullforce-web:${{ github.ref_name }} .
+          docker build -f Dockerfile.web -t ${{ github.repository_owner }}/ProfitForce-web:${{ github.ref_name }} .
 
       - name: Build ml
         run: |
-          docker build -f Dockerfile.ml -t ${{ github.repository_owner }}/bullforce-ml:${{ github.ref_name }} .
+          docker build -f Dockerfile.ml -t ${{ github.repository_owner }}/ProfitForce-ml:${{ github.ref_name }} .
 
       - name: Create GitHub Release
         uses: ncipollo/release-action@v1

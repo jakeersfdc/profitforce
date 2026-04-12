@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "ProfitForce-Signals",
+    "slug": "profitforce-signals",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "profitforce",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#071026"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.profitforce.signals",
+      "buildNumber": "1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#071026"
+      },
+      "package": "com.profitforce.signals",
+      "versionCode": 1,
+      "permissions": [
+        "NOTIFICATIONS"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ff047ca0-ad79-425f-8e6f-afed1f5741a5"
+      }
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#00ff99"
+        }
+      ],
+      "expo-secure-store",
+      "expo-asset"
+    ],
+    "owner": "jakeersfdc"
+  }
+}

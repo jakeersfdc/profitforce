@@ -6,8 +6,8 @@ import { isSubscriber } from '../../../lib/auth';
 
 export async function POST(req: Request) {
   try {
-    try { requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
-    const userId = requireUser();
+    try { await requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
+    const userId = await requireUser();
     // subscription gating: allow if no DB configured or if user is subscriber
     if (process.env.ALLOW_PUBLIC_TRAIN !== '1') {
       const subOk = await isSubscriber(userId).catch(() => false);

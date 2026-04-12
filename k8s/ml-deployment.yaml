@@ -1,25 +1,47 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bullforce-ml
+  name: ProfitForce-ml
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: bullforce-ml
+      app: ProfitForce-ml
   template:
     metadata:
       labels:
-        app: bullforce-ml
+        app: ProfitForce-ml
     spec:
       containers:
         - name: ml
-          image: REPLACE_WITH_REGISTRY/bullforce:ml-latest
+          image: REPLACE_WITH_REGISTRY/ProfitForce:ml-latest
           ports:
             - containerPort: 8000
           env:
             - name: MODEL_PATH
               value: /app/models/current_model.joblib
+          envFrom:
+            - secretRef:
+                name: ProfitForce-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
           volumeMounts:
             - name: models
               mountPath: /app/models
@@ -27,3 +49,15 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: models-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ProfitForce-ml
+spec:
+  selector:
+    app: ProfitForce-ml
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

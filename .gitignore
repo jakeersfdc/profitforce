@@ -60,6 +60,11 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env
 .env.*.local
+.publish_secrets.env
+
+# data files with user state
+data/watchlists.json
+data/orders.json
 
 # local IDE/editor
 .vscode/
@@ -76,3 +81,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# clerk configuration (can include secrets)
+/.clerk/
+
+.vercel

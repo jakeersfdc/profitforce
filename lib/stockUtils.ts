@@ -4,7 +4,7 @@
 let _yfClient: any = null;
 async function getYahooClient() {
   if (_yfClient) return _yfClient;
-  const mod = await import('yahoo-finance2');
+  const mod: any = await import('yahoo-finance2');
   // library may export a default factory/class or named YahooFinance
   const YahooFinance = mod.default ?? mod.YahooFinance ?? mod;
   if (typeof YahooFinance === 'function') {
@@ -35,17 +35,25 @@ const POPULAR_SYMBOLS = [
 
 // lightweight in-memory cache for historical queries
 const _histCache: Map<string, { ts: number; data: any[] }> = new Map();
-const HIST_CACHE_TTL = 60 * 1000; // 60 seconds
+const HIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// quote cache (3s TTL for near-realtime prices)
+const _quoteCache: Map<string, { ts: number; data: any }> = new Map();
+const QUOTE_CACHE_TTL = 3 * 1000;
 
 export async function fetchQuote(symbol: string) {
+  const cached = _quoteCache.get(symbol);
+  if (cached && Date.now() - cached.ts < QUOTE_CACHE_TTL) return cached.data;
   try {
     const yf = await getYahooClient();
     const quote = await yf.quote(symbol);
-    return {
+    const result = {
       symbol,
       price: quote?.regularMarketPrice ?? quote?.currentPrice ?? 0,
       changePercent: quote?.regularMarketChangePercent ?? 0,
     };
+    _quoteCache.set(symbol, { ts: Date.now(), data: result });
+    return result;
   } catch (error) {
     console.error(`Quote error for ${symbol}:`, error);
     return { symbol, price: 0, changePercent: 0 };
@@ -66,17 +74,18 @@ export async function getIndexPrices() {
     { id: 'HANGSENG', name: 'HANG SENG', sym: '^HSI' },
   ];
 
-  const results = [];
-  for (const idx of indices) {
-    const data = await fetchQuote(idx.sym);
-    results.push({
-      id: idx.id,
-      name: idx.name,
-      sym: idx.sym,
-      price: data.price,
-      change: data.changePercent,
-    });
-  }
+  const results = await Promise.all(
+    indices.map(async (idx) => {
+      const data = await fetchQuote(idx.sym);
+      return {
+        id: idx.id,
+        name: idx.name,
+        sym: idx.sym,
+        price: data.price,
+        change: data.changePercent,
+      };
+    })
+  );
   return results;
 }
 
@@ -356,6 +365,7 @@ export async function backtestWithSignalsV2(symbols = POPULAR_SYMBOLS, startDate
         if (smaShort == null || smaLong == null) continue;
         const prevShort = sma(closes, 5, i-1);
         const prevLong = sma(closes, 20, i-1);
+        if (prevShort == null || prevLong == null) continue;
 
         const buySignal = (smaShort > smaLong) && (prevShort <= prevLong);
         const sellSignal = (smaShort < smaLong) && (prevShort >= prevLong);
@@ -520,7 +530,7 @@ export async function getHistorical(symbol: string, startDate?: string, endDate?
     return mapped;
   } catch (e) {
     // Common: yahoo-finance2 may return "No data found" for delisted symbols — handle quietly
-    const msg = e && e.message ? e.message : String(e);
+    const msg = e instanceof Error ? e.message : String(e);
     if (msg && msg.toLowerCase().includes('no data')) {
       console.debug('getHistorical: no data for', symbol);
       return [];

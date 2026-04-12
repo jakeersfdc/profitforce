@@ -1,6 +1,6 @@
 'use client'
 import React, { useEffect, useState } from 'react';
-import { SignedIn, SignedOut, SignInButton, useUser } from '@clerk/nextjs';
+import { SignInButton, useUser } from '@clerk/nextjs';
 
 type UserRow = { id: number; clerk_id: string; email?: string; is_subscriber: boolean; created_at?: string };
 
@@ -43,12 +43,13 @@ export default function AdminSubscribersPage() {
   return (
     <div style={{ padding: 24 }}>
       <h1>Subscribers (Admin)</h1>
-      <SignedOut>
-        <p>You must sign in as an admin user to manage subscribers.</p>
-        <SignInButton />
-      </SignedOut>
-
-      <SignedIn>
+      {!isLoaded ? <div>Loading…</div> : !user ? (
+        <div>
+          <p>You must sign in as an admin user to manage subscribers.</p>
+          <SignInButton />
+        </div>
+      ) : (
+        <div>
         <div style={{ marginBottom: 12 }}>
           <strong>Signed in as:</strong> {user?.primaryEmailAddress?.emailAddress || user?.id}
         </div>
@@ -77,7 +78,8 @@ export default function AdminSubscribersPage() {
             ))}
           </tbody>
         </table>
-      </SignedIn>
+        </div>
+      )}
     </div>
   );
 }

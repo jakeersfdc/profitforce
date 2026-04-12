@@ -10,7 +10,7 @@ Usage: $0 [--repo OWNER/REPO] [--tag vX.Y.Z]
 
 Examples:
   # create remote, push main, create v0.1.0 tag and push it
-  $0 --repo youruser/bullforce-signals --tag v0.1.0
+  $0 --repo youruser/ProfitForce-signals --tag v0.1.0
 
 Notes:
   - Requires GitHub CLI `gh` and Docker (if you plan to build images).
@@ -18,7 +18,7 @@ Notes:
 EOF
 }
 
-REPO="jakeersfdc/bullforce-signals"
+REPO="jakeersfdc/ProfitForce-signals"
 TAG=""
 SKIP_SECRETS=0
 

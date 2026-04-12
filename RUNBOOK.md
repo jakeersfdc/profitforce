@@ -1,6 +1,6 @@
 # Production Runbook (starter)
 
-This runbook contains essential instructions for operating the Bullforce SaaS trading model infrastructure.
+This runbook contains essential instructions for operating the ProfitForce SaaS trading model infrastructure.
 
 1) Quick health checks
   - Frontend: Visit your Vercel deployment URL and sign in.

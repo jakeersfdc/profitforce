@@ -1,22 +1,58 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bullforce-web
+  name: ProfitForce-web
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: bullforce-web
+      app: ProfitForce-web
   template:
     metadata:
       labels:
-        app: bullforce-web
+        app: ProfitForce-web
     spec:
       containers:
         - name: web
-          image: REPLACE_WITH_REGISTRY/bullforce:web-latest
+          image: REPLACE_WITH_REGISTRY/ProfitForce:web-latest
           ports:
             - containerPort: 3000
           env:
             - name: INFERENCE_URL
-              value: http://bullforce-ml:8000
+              value: http://ProfitForce-ml:8000
+            - name: NODE_ENV
+              value: production
+          envFrom:
+            - secretRef:
+                name: ProfitForce-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/indices
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /api/indices
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ProfitForce-web
+spec:
+  selector:
+    app: ProfitForce-web
+  ports:
+    - port: 80
+      targetPort: 3000
+  type: LoadBalancer

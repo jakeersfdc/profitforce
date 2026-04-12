@@ -47,7 +47,42 @@ export async function GET(req: Request) {
     try { chain = await yf.options(symbol); } catch (e) { /* ignore */ }
     try { if (!chain) chain = await yf.optionChain(symbol); } catch (e) { /* ignore */ }
 
-    if (!chain) return NextResponse.json({ error: 'option chain fetch failed' }, { status: 500 });
+    // Yahoo Finance options API doesn't support Indian (.NS/.BO) stocks — fallback to strike ladder
+    if (!chain) {
+      try {
+        const { suggestOptionStrikes } = await import('@/lib/stockUtils');
+        const { generateSignal } = await import('@/lib/engine/SignalEngine');
+        const sig = await generateSignal(symbol);
+        const quote = await yf.quote(symbol);
+        const S = Number(quote?.regularMarketPrice ?? quote?.currentPrice ?? sig.entryPrice ?? 0);
+        const tick = S >= 1000 ? 50 : S >= 500 ? 25 : 10;
+        const strikesData = await suggestOptionStrikes(symbol, S, tick, 3);
+        const strikesList: number[] = (strikesData && 'strikes' in strikesData) ? strikesData.strikes as number[] : [];
+        const atm = (strikesData && 'atm' in strikesData) ? strikesData.atm as number : Math.round(S / tick) * tick;
+
+        // Build synthetic candidates from strike ladder
+        const candidates = strikesList.map(strike => {
+          const moneyness = (strike - S) / S;
+          const t = Math.max(daysToExpiry / 365, 1/365);
+          const syntheticIV = 0.20 + Math.abs(moneyness) * 0.3;
+          const delta = bsDelta(side as 'CALL' | 'PUT', S, strike, 0.06, syntheticIV, t);
+          const isOtm = side === 'CALL' ? strike > S : strike < S;
+          const score = isOtm ? 50 - Math.abs(moneyness) * 100 + Math.abs(delta) * 30 : 30 - Math.abs(moneyness) * 100;
+          return {
+            strike, lastPrice: null, iv: syntheticIV, expiry: null,
+            days: daysToExpiry, t, delta, score: Number(score.toFixed(2)),
+            type: strike === atm ? 'ATM' : isOtm ? 'OTM' : 'ITM',
+            synthetic: true,
+          };
+        }).sort((a, b) => b.score - a.score);
+
+        const best = candidates[0] ?? null;
+        return NextResponse.json({ symbol, underlying: S, side, targetDelta, daysToExpiry, best, candidates, synthetic: true });
+      } catch (fallbackErr) {
+        console.error('optionchain fallback error', fallbackErr);
+        return NextResponse.json({ error: 'Option chain not available for this symbol. Yahoo Finance does not provide options data for Indian (.NS) stocks.' }, { status: 404 });
+      }
+    }
 
     // normalize structure: many versions return { expirationDates, strikes, options: [ { calls:[], puts:[] } ] }
     const optionsBlock = chain.options?.[0] ?? chain?.[0] ?? chain;

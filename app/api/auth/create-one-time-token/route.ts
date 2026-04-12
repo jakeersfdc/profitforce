@@ -12,7 +12,7 @@ function getDbClient() {
 export async function POST(req: Request) {
   let userId: string;
   try {
-    userId = requireUser();
+    userId = await requireUser();
   } catch (e) {
     return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
   }
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
   await client.end();
 
   // deep link for mobile
-  const scheme = process.env.NEXT_PUBLIC_MOBILE_SCHEME || 'bullforce';
+  const scheme = process.env.NEXT_PUBLIC_MOBILE_SCHEME || 'profitforce';
   const deep = `${scheme}://auth?token=${token}`;
 
   return NextResponse.json({ token, deep_link: deep });

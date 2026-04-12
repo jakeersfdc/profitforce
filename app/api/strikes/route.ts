@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { calculateAISignal, suggestOptionStrikes } from '../../../lib/stockUtils';
+import { generateSignal } from '../../../lib/engine/SignalEngine';
+import { suggestOptionStrikes } from '../../../lib/stockUtils';
 
 export async function GET(req: Request) {
   try {
@@ -9,7 +10,7 @@ export async function GET(req: Request) {
     const pads = Number(url.searchParams.get('pads') ?? '2');
     if (!symbol) return NextResponse.json({ error: 'symbol required' }, { status: 400 });
 
-    const sig = await calculateAISignal(symbol);
+    const sig = await generateSignal(symbol);
     const strikes = await suggestOptionStrikes(symbol, sig.entryPrice ?? undefined, tick, pads);
 
     // pick recommendation based on signal

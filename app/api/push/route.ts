@@ -5,7 +5,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const token = body.token;
-    const title = body.title ?? 'Bullforce Alert';
+    const title = body.title ?? 'ProfitForce Alert';
     const message = body.message ?? '';
 
     // If FCM server key available, forward to FCM

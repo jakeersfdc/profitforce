@@ -69,7 +69,7 @@ Monitoring & Observability
 - Use logging aggregation (CloudWatch, Datadog, LogDNA).
 
 Cloud Run deploy notes
-- The included workflow `.github/workflows/deploy-cloudrun.yml` builds and deploys two services: `bullforce-web` and `bullforce-ml` to Cloud Run. Provide a service account key with permissions to Cloud Build and Cloud Run as `GCLOUD_SA_KEY` in GitHub Secrets and set `GCLOUD_PROJECT`.
+- The included workflow `.github/workflows/deploy-cloudrun.yml` builds and deploys two services: `ProfitForce-web` and `ProfitForce-ml` to Cloud Run. Provide a service account key with permissions to Cloud Build and Cloud Run as `GCLOUD_SA_KEY` in GitHub Secrets and set `GCLOUD_PROJECT`.
 
 Kubernetes notes
 - Basic Kubernetes manifests are provided under `k8s/` for reference. You should replace `REPLACE_WITH_REGISTRY` with your image registry and configure PVCs/ingress accordingly.

@@ -2,7 +2,6 @@ import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, Linking, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import MobileButton from './components/Button';
-import { StatusBar } from 'expo-status-bar';
 
 export default function App() {
   useEffect(() => {
@@ -13,7 +12,7 @@ export default function App() {
   }, []);
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Bullforce Mobile (scaffold)</Text>
+      <Text style={styles.title}>ProfitForce Mobile (scaffold)</Text>
       <Text style={styles.subtitle}>This is a starter Expo app. Connect it to your API endpoints.</Text>
       <MobileButton onPress={() => Linking.openURL('https://your-vercel-app.vercel.app/dashboard')}>Open Dashboard</MobileButton>
       <StatusBar style="auto" />

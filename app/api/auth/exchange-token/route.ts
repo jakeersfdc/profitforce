@@ -37,7 +37,10 @@ export async function POST(req: Request) {
     await client.end();
 
     const clerkId = row.clerk_id;
-    const jwtSecret = process.env.JWT_SECRET || process.env.INFERENCE_JWT_SECRET || 'dev-secret';
+    const jwtSecret = process.env.JWT_SECRET || process.env.INFERENCE_JWT_SECRET;
+    if (!jwtSecret) {
+      return NextResponse.json({ error: 'server_misconfigured: JWT_SECRET not set' }, { status: 500 });
+    }
     const payload = { sub: clerkId, iat: Math.floor(Date.now() / 1000) };
     const signed = jwt.sign(payload, jwtSecret, { expiresIn: '7d' });
 

@@ -26,13 +26,13 @@ jobs:
 
       - name: Build and push image
         run: |
-          IMAGE=gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-web:${{ github.sha }}
+          IMAGE=gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-web:${{ github.sha }}
           gcloud builds submit --tag "$IMAGE" .
 
       - name: Deploy to Cloud Run
         run: |
-          IMAGE=gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-web:${{ github.sha }}
-          gcloud run deploy bullforce-web \
+          IMAGE=gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-web:${{ github.sha }}
+          gcloud run deploy ProfitForce-web \
             --image "$IMAGE" \
             --region ${CLOUD_RUN_REGION:-us-central1} \
             --platform managed \
@@ -41,13 +41,13 @@ jobs:
 
       - name: Build and push ML image
         run: |
-          IMAGE_ML=gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-ml:${{ github.sha }}
+          IMAGE_ML=gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-ml:${{ github.sha }}
           gcloud builds submit --tag "$IMAGE_ML" -f Dockerfile.ml .
 
       - name: Deploy ML to Cloud Run
         run: |
-          IMAGE_ML=gcr.io/${{ secrets.GCLOUD_PROJECT }}/bullforce-ml:${{ github.sha }}
-          gcloud run deploy bullforce-ml \
+          IMAGE_ML=gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-ml:${{ github.sha }}
+          gcloud run deploy ProfitForce-ml \
             --image "$IMAGE_ML" \
             --region ${CLOUD_RUN_REGION:-us-central1} \
             --platform managed \

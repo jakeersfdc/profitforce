@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { Client } from 'pg';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET || '', { apiVersion: '2023-08-16' });
+const stripe = new Stripe(process.env.STRIPE_SECRET || '', { apiVersion: '2022-11-15' });
 
 function getDbClient() {
   const dbUrl = process.env.DATABASE_URL;
@@ -12,16 +12,15 @@ function getDbClient() {
 
 export async function POST(req: Request) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    console.error('STRIPE_WEBHOOK_SECRET not configured — rejecting webhook');
+    return NextResponse.json({ error: 'webhook_not_configured' }, { status: 500 });
+  }
   const buf = await req.arrayBuffer();
   const raw = Buffer.from(buf);
   let event: Stripe.Event;
   try {
-    if (secret) {
-      event = stripe.webhooks.constructEvent(raw, req.headers.get('stripe-signature') || '', secret);
-    } else {
-      // if no webhook signing secret, parse body directly (less secure)
-      event = JSON.parse(raw.toString());
-    }
+    event = stripe.webhooks.constructEvent(raw, req.headers.get('stripe-signature') || '', secret);
   } catch (err: any) {
     return NextResponse.json({ error: 'invalid_webhook', details: String(err.message || err) }, { status: 400 });
   }

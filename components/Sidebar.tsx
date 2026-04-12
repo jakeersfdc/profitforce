@@ -21,7 +21,7 @@ export default function Sidebar() {
       {/* Mobile top bar */}
       <div className="md:hidden flex items-center justify-between p-3 bg-transparent">
         <div className="flex items-center gap-3">
-          <div className="text-lg font-semibold">Bullforce</div>
+          <div className="text-lg font-semibold">ProfitForce</div>
         </div>
         <button
           aria-label="Toggle menu"
@@ -35,7 +35,7 @@ export default function Sidebar() {
       {/* Desktop sidebar */}
       <aside className="hidden md:flex flex-col w-72 p-4 bf-sidebar bf-shadow">
         <div className="px-2 py-4 flex items-center gap-3">
-          <div className="text-2xl font-bold">Bullforce</div>
+          <div className="text-2xl font-bold">ProfitForce</div>
         </div>
 
         <nav className="mt-6 flex-1">
@@ -74,7 +74,7 @@ export default function Sidebar() {
           <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
           <div className="absolute left-0 top-0 bottom-0 w-64 p-4 bf-sidebar bf-shadow">
             <div className="flex items-center justify-between">
-              <div className="text-lg font-bold">Bullforce</div>
+              <div className="text-lg font-bold">ProfitForce</div>
               <button onClick={() => setOpen(false)} aria-label="Close" className="p-1">
                 <X />
               </button>

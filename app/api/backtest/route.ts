@@ -5,8 +5,8 @@ import { isSubscriber } from '../../../lib/auth';
 
 export async function POST(req: Request) {
   try {
-    try { requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
-    const userId = requireUser();
+    try { await requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
+    const userId = await requireUser();
     if (process.env.ALLOW_PUBLIC_BACKTEST !== '1') {
       const ok = await isSubscriber(userId).catch(() => false);
       if (!ok) return NextResponse.json({ error: 'subscription required' }, { status: 403 });

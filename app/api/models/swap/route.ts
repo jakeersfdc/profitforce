@@ -5,7 +5,7 @@ import { requireUser } from '../../../../lib/clerkServer';
 
 export async function POST(req: Request) {
   try {
-    try { requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
+    try { await requireUser(); } catch (e) { return NextResponse.json({ error: 'unauthenticated' }, { status: 401 }); }
     const body = await req.json();
     const name = body?.name;
     if (!name) return NextResponse.json({ error: 'missing name' }, { status: 400 });

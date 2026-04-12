@@ -49,9 +49,13 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  // protected webhook: set MODEL_DEPLOY_SECRET in your deployment
+  // protected webhook: MODEL_DEPLOY_SECRET is required in production
   const secret = req.headers.get('x-model-secret');
-  if (process.env.MODEL_DEPLOY_SECRET && process.env.MODEL_DEPLOY_SECRET !== secret) {
+  const deploySecret = process.env.MODEL_DEPLOY_SECRET;
+  if (!deploySecret) {
+    return NextResponse.json({ error: 'MODEL_DEPLOY_SECRET not configured' }, { status: 500 });
+  }
+  if (deploySecret !== secret) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 

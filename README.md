@@ -1,4 +1,4 @@
-# Bullforce Signals
+# ProfitForce Signals
 
 This repository is a Next.js (app directory) dashboard that fetches market data and computes trading signals.
 
@@ -79,7 +79,7 @@ Admin endpoints are available under the app API at `/api/admin/subscribers`. Pro
 Example env vars to set (development):
 
 ```
-DATABASE_URL=postgresql://user:pass@localhost:5432/bullforce
+DATABASE_URL=postgresql://user:pass@localhost:5432/ProfitForce
 ADMIN_USERS=clerk_user_id_here
 ```
 
