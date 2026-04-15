@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { generateSignal } from '../../../lib/engine/SignalEngine';
-import { suggestOptionStrikes } from '../../../lib/stockUtils';
+import { suggestOptionStrikes, fetchQuote } from '../../../lib/stockUtils';
 
 export async function GET(req: Request) {
   try {
@@ -10,8 +10,13 @@ export async function GET(req: Request) {
     const pads = Number(url.searchParams.get('pads') ?? '2');
     if (!symbol) return NextResponse.json({ error: 'symbol required' }, { status: 400 });
 
-    const sig = await generateSignal(symbol);
-    const strikes = await suggestOptionStrikes(symbol, sig.entryPrice ?? undefined, tick, pads);
+    const [sig, liveQuote] = await Promise.all([
+      generateSignal(symbol),
+      fetchQuote(symbol),
+    ]);
+    // Use live quote price (not the signal's entryPrice which is last-day close)
+    const livePrice = liveQuote.price > 0 ? liveQuote.price : sig.entryPrice;
+    const strikes = await suggestOptionStrikes(symbol, livePrice, tick, pads);
 
     // pick recommendation based on signal
     let recommendation: any = null;

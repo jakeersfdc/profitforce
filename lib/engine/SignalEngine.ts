@@ -320,7 +320,9 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (signal === 'SELL' && rsiVal < 25 && macdHist > macdHistPrev) signal = 'EXIT';
 
   // ── Compute entry / stop / target using ATR ────────────────────────────────
-  const entryPrice = lastClose;
+  // Use live quote price instead of last historical close for accurate entry
+  const liveQuote = await fetchQuote(symbol);
+  const entryPrice = liveQuote.price > 0 ? liveQuote.price : lastClose;
   let stopLoss: number | null = null;
   let targetPrice: number | null = null;
   let trailingStop: number | null = null;
