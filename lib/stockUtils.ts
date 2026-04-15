@@ -37,9 +37,9 @@ const POPULAR_SYMBOLS = [
 const _histCache: Map<string, { ts: number; data: any[] }> = new Map();
 const HIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// quote cache (3s TTL for near-realtime prices)
+// quote cache (1s TTL for near-realtime prices)
 const _quoteCache: Map<string, { ts: number; data: any }> = new Map();
-const QUOTE_CACHE_TTL = 3 * 1000;
+const QUOTE_CACHE_TTL = 1 * 1000;
 
 export async function fetchQuote(symbol: string) {
   const cached = _quoteCache.get(symbol);
