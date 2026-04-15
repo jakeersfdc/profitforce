@@ -309,12 +309,11 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   // ── Determine signal ──────────────────────────────────────────────────────
   const netScore = bullScore - bearScore;
   const totalVotes = bullScore + bearScore;
-  const minConfluence = 3; // need at least 3 confluence points
+  const minConfluence = 1; // lowered: any directional bias triggers a signal
 
   let signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD' = 'HOLD';
-  if (netScore >= minConfluence && trending) signal = 'BUY';
-  else if (netScore <= -minConfluence && trending) signal = 'SELL';
-  else if (Math.abs(netScore) >= minConfluence) signal = netScore > 0 ? 'BUY' : 'SELL';
+  if (netScore >= minConfluence) signal = 'BUY';
+  else if (netScore <= -minConfluence) signal = 'SELL';
 
   // EXIT signal: counter-trend trigger when in position context
   if (signal === 'BUY' && rsiVal > 75 && macdHist < macdHistPrev) signal = 'EXIT';
