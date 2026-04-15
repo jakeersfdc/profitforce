@@ -268,7 +268,7 @@ export default function DashboardClient() {
       setIndexOptions(results);
     };
     fetchIndexStrikes();
-    const interval = setInterval(fetchIndexStrikes, 3_000);
+    const interval = setInterval(fetchIndexStrikes, 1_000);
     return () => clearInterval(interval);
   }, []);
 

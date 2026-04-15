@@ -51,8 +51,8 @@ export async function GET(req: NextRequest) {
       await Promise.all([tickIndices(), tickSignals()]);
 
       // Set up intervals
-      const indicesInterval = setInterval(tickIndices, 3000);
-      const signalsInterval = setInterval(tickSignals, 10000);
+      const indicesInterval = setInterval(tickIndices, 1000);
+      const signalsInterval = setInterval(tickSignals, 1000);
       const heartbeat = setInterval(() => {
         if (closed) return;
         send('heartbeat', { ts: Date.now() });
