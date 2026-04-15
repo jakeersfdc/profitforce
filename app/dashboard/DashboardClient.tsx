@@ -762,14 +762,16 @@ function IndexCard({ idx, fl }: { idx: IndexData; fl?: "up" | "down" }) {
 
 function IndexCardSmall({ idx, fl }: { idx: IndexData; fl?: "up" | "down" }) {
   const up = (idx.change ?? 0) >= 0;
+  const p = pts(idx.price, idx.change);
   return (
     <div className={`rounded-lg p-2.5 border transition-all duration-300 ${fl === "up" ? "ring-1 ring-green-400" : fl === "down" ? "ring-1 ring-red-400" : ""} ${up ? "border-green-600/40 bg-green-950/20" : "border-red-600/40 bg-red-950/20"}`}>
       <div className="text-[10px] text-white/70 truncate font-medium">{idx.name}</div>
       <div className={`text-sm font-extrabold tabular-nums ${up ? "text-green-400" : "text-red-400"}`}>
         {idx.price != null ? idx.price.toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"}
       </div>
-      <div className={`text-xs font-bold ${up ? "text-green-300" : "text-red-300"}`}>
+      <div className={`text-[10px] font-bold ${up ? "text-green-300" : "text-red-300"}`}>
         {up ? "▲" : "▼"} {pct(idx.change)}
+        {p != null && <span className="ml-1 text-white/60">({up ? "+" : ""}{p.toFixed(2)})</span>}
       </div>
     </div>
   );
