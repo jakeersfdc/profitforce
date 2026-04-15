@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ClerkProvider } from "@clerk/nextjs";
-import Sidebar from "../components/Sidebar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,18 +28,19 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <meta name="theme-color" content="#071026" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+      </head>
       <body className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
         <ClerkProvider
-          // Provide the publishable key via environment variable
           publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
         >
-          <div className="flex h-screen">
-            <Sidebar />
-
-            <main className="flex-1 overflow-auto p-6">
-              <div className="max-w-[1400px] mx-auto">{children}</div>
-            </main>
-          </div>
+          <main className="min-h-screen overflow-auto">
+            <div className="max-w-[1600px] mx-auto">{children}</div>
+          </main>
         </ClerkProvider>
       </body>
     </html>

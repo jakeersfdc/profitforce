@@ -1,812 +1,1036 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import SignalTable from '../../components/SignalTable';
-import SuperCharts from '../../components/SuperCharts';
+import React, { useState, useEffect, useCallback, useRef } from "react";
+
+/* ─────────────────────── Types ─────────────────────── */
+type IndexData = {
+  id: string;
+  name: string;
+  sym: string;
+  price: number | null;
+  change: number | null;
+};
+
+type FnORec = {
+  type: string;
+  strike?: number | null;
+  reason?: string;
+};
+
+type Signal = {
+  symbol: string;
+  name?: string;
+  signal: string;
+  entryPrice: number | null;
+  stopLoss: number | null;
+  targetPrice: number | null;
+  trailingStop: number | null;
+  strength: number;
+  confidence: number;
+  reason: string;
+  fnoRecommendation: FnORec | null;
+  currentPrice?: number | null;
+  timestamp?: string | null;
+};
+
+type StrikeRec = {
+  type: string;
+  strike: number | null;
+  entry: number;
+  stop: number;
+  target: number;
+  reason?: string;
+};
+
+type StrikesData = {
+  strikes: { atm: number; tick: number; strikes: number[]; price: number };
+  recommendation: StrikeRec;
+};
+
+type AlertResult = {
+  symbol: string;
+  name?: string;
+  signal: string;
+  entryPrice?: number | null;
+  stopLoss?: number | null;
+  targetPrice?: number | null;
+  entry?: number | null;
+  stop?: number | null;
+  target?: number | null;
+};
+
+type Alert = { ts: string; results: AlertResult[] };
+
+/* ─────────────────── Helpers ─────────────────── */
+const INR = (v: number | null | undefined) => {
+  if (v == null) return "—";
+  return "₹" + Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+const pct = (v: number | null | undefined) =>
+  v != null ? `${Number(v).toFixed(2)}%` : "—";
+
+const pts = (price: number | null, change: number | null) =>
+  price != null && change != null ? (price * change) / 100 : null;
+
+function timeAgo(ts: string) {
+  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+const LOT_SIZES = [1, 3, 5, 10, 20, 30, 40];
+
+function indexShortName(label: string) {
+  if (label.includes("NIFTY 50") || label.includes("NSEI")) return "NIFTY";
+  if (label.includes("BANK") || label.includes("NSEBANK")) return "BANKNIFTY";
+  if (label.includes("SENSEX") || label.includes("BSESN")) return "SENSEX";
+  return label.replace(/[^A-Z]/g, "");
+}
+
+/* ── Black-Scholes Option Premium Estimator ── */
+function normCdf(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1 / (1 + p * Math.abs(x));
+  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x / 2);
+  return 0.5 * (1 + sign * y);
+}
+
+function bsCallPrice(spot: number, strike: number, t: number, r: number, iv: number): number {
+  if (t <= 0 || iv <= 0) return Math.max(spot - strike, 0);
+  const d1 = (Math.log(spot / strike) + (r + iv * iv / 2) * t) / (iv * Math.sqrt(t));
+  const d2 = d1 - iv * Math.sqrt(t);
+  return spot * normCdf(d1) - strike * Math.exp(-r * t) * normCdf(d2);
+}
+
+function bsPutPrice(spot: number, strike: number, t: number, r: number, iv: number): number {
+  if (t <= 0 || iv <= 0) return Math.max(strike - spot, 0);
+  const d1 = (Math.log(spot / strike) + (r + iv * iv / 2) * t) / (iv * Math.sqrt(t));
+  const d2 = d1 - iv * Math.sqrt(t);
+  return strike * Math.exp(-r * t) * normCdf(-d2) - spot * normCdf(-d1);
+}
+
+function estimatePremium(spot: number, strike: number, isCall: boolean, daysToExpiry = 7): number {
+  const t = daysToExpiry / 365;
+  const r = 0.065; // RBI rate ~6.5%
+  const moneyness = Math.abs(spot - strike) / spot;
+  const iv = 0.15 + moneyness * 0.4; // base 15% IV, rising for OTM
+  const price = isCall ? bsCallPrice(spot, strike, t, r, iv) : bsPutPrice(spot, strike, t, r, iv);
+  return Math.max(Math.round(price * 100) / 100, 0.5);
+}
+
+function estimateOptionSLTarget(premium: number, strength: number) {
+  // Expert-style: SL ~40-60% of premium, targets at 2x, 3x, 4x+
+  const conf = Math.max(strength, 40) / 100;
+  const sl = Math.round(premium * (0.35 + (1 - conf) * 0.25)); // tighter SL for higher confidence
+  const t1 = Math.round(premium * (1.8 + conf * 0.7));  // ~2-2.5x
+  const t2 = Math.round(premium * (2.5 + conf * 1.0));  // ~3-3.5x
+  const t3 = Math.round(premium * (3.5 + conf * 1.5));  // ~4-5x
+  return { sl, t1, t2, t3 };
+}
+
+function formatTradeCall(
+  spot: number,
+  strike: number | null,
+  isCall: boolean,
+  indexName: string,
+  strength: number,
+) {
+  const strikeVal = strike ?? Math.round(spot / 50) * 50;
+  const premium = estimatePremium(spot, strikeVal, isCall);
+  const { sl, t1, t2, t3 } = estimateOptionSLTarget(premium, strength);
+  const lo = Math.floor(premium / 5) * 5;
+  const hi = lo + 5;
+  const optType = isCall ? "CE" : "PE";
+  const dir = isCall ? "BUY" : "BUY";
+  return {
+    headline: `${dir} ${indexName} ${strikeVal}${optType} @ ${lo}-${hi}`,
+    premium,
+    slLine: `SL ${sl}`,
+    tgtLine: `TGT ${t1}/${t2}/${t3}++++`,
+    lotLine: `LOT ${LOT_SIZES.join("/")}`,
+    sl, t1, t2, t3,
+  };
+}
+
+function Badge({ signal }: { signal: string }) {
+  const s = String(signal).toUpperCase();
+  const c =
+    s === "BUY"
+      ? "bg-green-500 text-black shadow-lg shadow-green-500/30"
+      : s === "SELL"
+      ? "bg-red-500 text-white shadow-lg shadow-red-500/30"
+      : s === "EXIT"
+      ? "bg-yellow-400 text-black shadow-lg shadow-yellow-400/30"
+      : "bg-gray-500 text-white";
+  return (
+    <span className={`inline-block px-3 py-0.5 text-xs rounded-full font-extrabold tracking-wider ${c}`}>
+      {s}
+    </span>
+  );
+}
+
+function FnoBadge({ rec }: { rec: FnORec | null }) {
+  if (!rec || rec.type === "NONE" || rec.type === "HOLD") return <span className="text-[var(--bf-muted)] text-xs">—</span>;
+  const isCall = rec.type.includes("CALL");
+  return (
+    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isCall ? "bg-emerald-900 text-emerald-300" : "bg-rose-900 text-rose-300"}`}>
+      {rec.type.replace("_", " ")}
+      {rec.strike != null ? ` ₹${Number(rec.strike).toLocaleString()}` : ""}
+    </span>
+  );
+}
+
+const INDIA_IDS = ["NIFTY", "SENSEX", "BANKNIFTY"];
+const GLOBAL_IDS = ["DOWJ", "SP500", "NASDAQ", "FTSE", "NIKKEI", "HANGSENG"];
+
+const ALL_INDICES: IndexData[] = [
+  { sym: "^NSEI", name: "NIFTY 50", price: null, change: null, id: "NIFTY" },
+  { sym: "^BSESN", name: "SENSEX", price: null, change: null, id: "SENSEX" },
+  { sym: "^NSEBANK", name: "BANK NIFTY", price: null, change: null, id: "BANKNIFTY" },
+  { sym: "^DJI", name: "DOW JONES", price: null, change: null, id: "DOWJ" },
+  { sym: "^GSPC", name: "S&P 500", price: null, change: null, id: "SP500" },
+  { sym: "^IXIC", name: "NASDAQ", price: null, change: null, id: "NASDAQ" },
+  { sym: "^FTSE", name: "FTSE 100", price: null, change: null, id: "FTSE" },
+  { sym: "^N225", name: "NIKKEI 225", price: null, change: null, id: "NIKKEI" },
+  { sym: "^HSI", name: "HANG SENG", price: null, change: null, id: "HANGSENG" },
+];
+
+/* ═══════════════════════════════════════════════════════
+   MAIN DASHBOARD
+   ═══════════════════════════════════════════════════════ */
 
 export default function DashboardClient() {
-  const [allIndices, setAllIndices] = useState<any[]>([
-    { sym: '^NSEI', name: 'NIFTY 50', price: null, change: null, id: 'NIFTY' },
-    { sym: '^BSESN', name: 'SENSEX', price: null, change: null, id: 'SENSEX' },
-    { sym: '^NSEBANK', name: 'BANKNIFTY', price: null, change: null, id: 'BANKNIFTY' },
-    { sym: '^DJI', name: 'DOW JONES', price: null, change: null, id: 'DOWJ' },
-    { sym: '^GSPC', name: 'S&P 500', price: null, change: null, id: 'SP500' },
-    { sym: '^IXIC', name: 'NASDAQ', price: null, change: null, id: 'NASDAQ' },
-    { sym: '^FTSE', name: 'FTSE 100', price: null, change: null, id: 'FTSE' },
-    { sym: '^N225', name: 'NIKKEI 225', price: null, change: null, id: 'NIKKEI' },
-    { sym: '^HSI', name: 'HANG SENG', price: null, change: null, id: 'HANGSENG' },
+  /* ── state ── */
+  const [indices, setIndices] = useState<IndexData[]>(ALL_INDICES);
+  const [marketStatus, setMarketStatus] = useState("Connecting…");
+  const [isMarketOpen, setIsMarketOpen] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState("");
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [signalsLoading, setSignalsLoading] = useState(true);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
+  const [soundOn, setSoundOn] = useState(true);
+  const [flash, setFlash] = useState<Record<string, "up" | "down">>({});
+  const [expandedSym, setExpandedSym] = useState<string | null>(null);
+  const [strikesCache, setStrikesCache] = useState<Record<string, StrikesData>>({});
+  const [strikesLoading, setStrikesLoading] = useState<string | null>(null);
+
+  /* index options: auto-fetched for NIFTY, SENSEX, BANKNIFTY */
+  type IndexOption = { sym: string; label: string; signal: Signal | null; strikes: StrikesData | null; loading: boolean; error: string | null };
+  const [indexOptions, setIndexOptions] = useState<IndexOption[]>([
+    { sym: "^NSEI", label: "NIFTY 50", signal: null, strikes: null, loading: true, error: null },
+    { sym: "^BSESN", label: "SENSEX", signal: null, strikes: null, loading: true, error: null },
+    { sym: "^NSEBANK", label: "BANK NIFTY", signal: null, strikes: null, loading: true, error: null },
   ]);
 
-  const [marketStatus, setMarketStatus] = useState('Checking market status...');
-  const [isMarketOpen, setIsMarketOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [lastRefresh, setLastRefresh] = useState<string>('');
-
-  const [signals, setSignals] = useState<any[]>([]);
-  const [signalsLoading, setSignalsLoading] = useState(true);
-
-  const [backtestSymbol, setBacktestSymbol] = useState<string>('^NSEI');
-  const [btStart, setBtStart] = useState<string>('');
-  const [btEnd, setBtEnd] = useState<string>('');
-  const [backtestResults, setBacktestResults] = useState<any[] | null>(null);
-  const [startingCapitalInput, setStartingCapitalInput] = useState<number>(100000);
-  const [riskPerTradeInput, setRiskPerTradeInput] = useState<number>(0.01);
-  const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' } | null>(null);
-  const [alerts, setAlerts] = useState<any[]>([]);
-  const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [optionSide, setOptionSide] = useState<'CALL' | 'PUT'>('CALL');
-  const [targetDelta, setTargetDelta] = useState<number>(0.3);
-  const [maxPremium, setMaxPremium] = useState<number>(5000);
-  const [daysToExpiry, setDaysToExpiry] = useState<number>(30);
-  const [optionCandidates, setOptionCandidates] = useState<any[] | null>(null);
-  const [optionBest, setOptionBest] = useState<any | null>(null);
-  const [optionLoading, setOptionLoading] = useState(false);
-  const [prediction, setPrediction] = useState<any | null>(null);
-  const [predictionLoading, setPredictionLoading] = useState(false);
-  const [models, setModels] = useState<any[] | null>(null);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelInfo, setModelInfo] = useState<any | null>(null);
-  const [modelInfoLoading, setModelInfoLoading] = useState(false);
-  const [modelInfoCheckedAt, setModelInfoCheckedAt] = useState<string | null>(null);
-  const [expandedBacktests, setExpandedBacktests] = useState<Record<string, boolean>>({});
-  const [autoTradeEnabled, setAutoTradeEnabled] = useState(false);
-  const [positions, setPositions] = useState<any[]>([]);
-  const autoTradeTimer = useRef<any>(null);
   const streamRef = useRef<EventSource | null>(null);
-  const reconnectTimer = useRef<any>(null);
-  const prevPricesRef = useRef<Record<string, number>>({});
-  const [priceFlash, setPriceFlash] = useState<Record<string, 'up' | 'down' | null>>({});
+  const prevPrices = useRef<Record<string, number>>({});
 
-  // ── Real-time SSE stream (indices every 3s, signals every 10s) ──
+  /* ── auto-fetch index options on mount + every 30s ── */
   useEffect(() => {
-    let retryDelay = 1000;
+    const fetchIndexStrikes = async () => {
+      const syms = ["^NSEI", "^BSESN", "^NSEBANK"];
+      const labels = ["NIFTY 50", "SENSEX", "BANK NIFTY"];
+      const results = await Promise.all(
+        syms.map(async (sym, i) => {
+          try {
+            const [sigRes, stRes] = await Promise.all([
+              fetch(`/api/signal?symbol=${encodeURIComponent(sym)}`),
+              fetch(`/api/strikes?symbol=${encodeURIComponent(sym)}&pads=3`),
+            ]);
+            const sigJson = sigRes.ok ? await sigRes.json() : null;
+            const stJson = stRes.ok ? await stRes.json() : null;
+            const sig: Signal | null = sigJson?.signal
+              ? {
+                  symbol: sym,
+                  name: labels[i],
+                  signal: sigJson.signal.signal ?? "HOLD",
+                  entryPrice: sigJson.signal.entryPrice ?? null,
+                  stopLoss: sigJson.signal.stopLoss ?? null,
+                  targetPrice: sigJson.signal.targetPrice ?? null,
+                  trailingStop: sigJson.signal.trailingStop ?? null,
+                  strength: sigJson.signal.strength ?? 0,
+                  confidence: sigJson.signal.confidence ?? 0,
+                  reason: sigJson.signal.reason ?? "",
+                  fnoRecommendation: sigJson.signal.fnoRecommendation ?? null,
+                  timestamp: sigJson.signal.timestamp ?? null,
+                }
+              : null;
+            return { sym, label: labels[i], signal: sig, strikes: stJson, loading: false, error: null };
+          } catch {
+            return { sym, label: labels[i], signal: null, strikes: null, loading: false, error: "Failed to load" };
+          }
+        })
+      );
+      setIndexOptions(results);
+    };
+    fetchIndexStrikes();
+    const interval = setInterval(fetchIndexStrikes, 3_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  /* ── audio beep ── */
+  const beep = useCallback(() => {
+    if (!soundOn || typeof window === "undefined") return;
+    try {
+      const ctx = new (window.AudioContext || (window as unknown as Record<string, typeof AudioContext>).webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.frequency.value = 880;
+      o.type = "sine";
+      g.gain.value = 0.12;
+      o.start();
+      o.stop(ctx.currentTime + 0.12);
+    } catch {
+      /* no audio context */
+    }
+  }, [soundOn]);
+
+  /* ── SSE: indices + signals ── */
+  useEffect(() => {
+    let delay = 1000;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      if (streamRef.current) { try { streamRef.current.close(); } catch {} }
-
-      const es = new EventSource('/api/stream');
+      if (streamRef.current) try { streamRef.current.close(); } catch { /* */ }
+      const es = new EventSource("/api/stream");
       streamRef.current = es;
 
-      es.addEventListener('indices', (ev) => {
+      es.addEventListener("indices", (ev) => {
         try {
           const { indices: fresh, ts } = JSON.parse(ev.data);
-
-          // Detect price changes for flash animation
-          const flashes: Record<string, 'up' | 'down' | null> = {};
-          for (const f of (fresh ?? [])) {
-            const key = f.id || f.sym;
-            const prev = prevPricesRef.current[key];
-            if (prev != null && f.price != null && f.price !== prev) {
-              flashes[key] = f.price > prev ? 'up' : 'down';
-            }
-            if (f.price != null) prevPricesRef.current[key] = f.price;
+          // flash
+          const fl: Record<string, "up" | "down"> = {};
+          for (const f of fresh ?? []) {
+            const k = f.id || f.sym;
+            const p = prevPrices.current[k];
+            if (p != null && f.price != null && f.price !== p) fl[k] = f.price > p ? "up" : "down";
+            if (f.price != null) prevPrices.current[k] = f.price;
           }
-          if (Object.keys(flashes).length > 0) {
-            setPriceFlash(flashes);
-            setTimeout(() => setPriceFlash({}), 600); // clear flash after 600ms
-          }
+          if (Object.keys(fl).length) { setFlash(fl); setTimeout(() => setFlash({}), 600); }
 
-          setAllIndices(prev => prev.map((idx) => {
-            const found = (fresh ?? []).find((f: any) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id);
-            return {
-              ...idx,
-              price: found?.price != null ? Number(found.price) : idx.price,
-              change: found?.change != null ? Number(found.change) : idx.change,
-            };
-          }));
+          setIndices((prev) =>
+            prev.map((idx) => {
+              const m = (fresh ?? []).find(
+                (f: IndexData) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id
+              );
+              return m
+                ? { ...idx, price: m.price != null ? Number(m.price) : idx.price, change: m.change != null ? Number(m.change) : idx.change }
+                : idx;
+            })
+          );
 
-          // Market hours detection
+          // market hours
           const now = new Date(ts);
-          const istOffset = 5.5 * 60;
-          const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-          const istMinutes = utcMinutes + istOffset;
-          const istHour = Math.floor(istMinutes / 60) % 24;
-          const istMin = istMinutes % 60;
-          const dayOfWeek = now.getUTCDay();
-          const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-          const mktOpen = isWeekday && ((istHour === 9 && istMin >= 15) || (istHour > 9 && istHour < 15) || (istHour === 15 && istMin <= 30));
-
-          const anyLive = (fresh ?? []).some((u: any) => u.price != null && u.price !== 0);
-          if (anyLive) {
-            if (mktOpen) {
-              setMarketStatus('🟢 Market Open — Live Streaming (every 3s)');
-              setIsMarketOpen(true);
-            } else {
-              setMarketStatus('🟡 Data Available — Market Closed');
-              setIsMarketOpen(false);
-            }
-          } else {
-            setMarketStatus('🔴 Market Closed (Weekend / Holiday)');
-            setIsMarketOpen(false);
-          }
-          setLastRefresh(new Date(ts).toLocaleTimeString());
-          setLoading(false);
-        } catch {}
+          const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes()) + 330;
+          const h = Math.floor(istMin / 60) % 24;
+          const m = istMin % 60;
+          const wd = now.getUTCDay();
+          const open = wd >= 1 && wd <= 5 && ((h === 9 && m >= 15) || (h > 9 && h < 15) || (h === 15 && m <= 30));
+          const live = (fresh ?? []).some((u: IndexData) => u.price != null && u.price !== 0);
+          setIsMarketOpen(live && open);
+          setMarketStatus(live ? (open ? "🟢 Market LIVE" : "🔴 Market Closed") : "🔴 Offline");
+          setLastRefresh(now.toLocaleTimeString());
+        } catch { /* */ }
       });
 
-      es.addEventListener('signals', (ev) => {
+      es.addEventListener("signals", (ev) => {
         try {
           const { results } = JSON.parse(ev.data);
           setSignals(results ?? []);
           setSignalsLoading(false);
-        } catch {}
+        } catch { /* */ }
       });
 
-      es.addEventListener('connected', () => {
-        retryDelay = 1000; // reset backoff on successful connect
-      });
-
+      es.addEventListener("connected", () => { delay = 1000; });
       es.onerror = () => {
         es.close();
         streamRef.current = null;
-        // Reconnect with exponential backoff (max 10s)
-        reconnectTimer.current = setTimeout(() => {
-          retryDelay = Math.min(retryDelay * 1.5, 10000);
-          connect();
-        }, retryDelay);
+        timer = setTimeout(() => { delay = Math.min(delay * 1.5, 10_000); connect(); }, delay);
       };
     };
 
     connect();
-
     return () => {
-      if (streamRef.current) { try { streamRef.current.close(); } catch {} }
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (streamRef.current) try { streamRef.current.close(); } catch { /* */ }
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
-  // Auto-trade toggle
-  useEffect(() => {
-    if (!autoTradeEnabled) {
-      if (autoTradeTimer.current) clearInterval(autoTradeTimer.current);
-      return;
-    }
-    const runCycle = async () => {
-      try {
-        const res = await fetch('/api/trade/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'full' }) });
-        const json = await res.json();
-        if (json.newSignals?.length) setToast({ message: `Auto: ${json.newSignals.length} new signals, ${json.alertsSent} alerts sent`, type: 'success' });
-        if (json.exits?.length) setToast({ message: `Auto: ${json.exits.length} positions exited`, type: 'info' });
-      } catch (e) { console.error('auto-trade cycle failed', e); }
-    };
-    runCycle();
-    autoTradeTimer.current = setInterval(runCycle, 60000); // run every 60s
-    return () => { if (autoTradeTimer.current) clearInterval(autoTradeTimer.current); };
-  }, [autoTradeEnabled]);
-
-  // Fetch positions
-  const fetchPositions = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trade/auto', { cache: 'no-store' });
-      const json = await res.json();
-      setPositions(json?.positions ?? []);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => {
-    fetchPositions();
-    const id = setInterval(fetchPositions, 10000); // 10s for positions
-    return () => clearInterval(id);
-  }, [fetchPositions]);
-
-  const fetchModels = async () => {
-    setModelsLoading(true);
-    try {
-      const res = await fetch('/api/model', { cache: 'no-store' });
-      const j = await res.json();
-      setModels(j?.models ?? j?.results?.models ?? j?.results ?? null);
-    } catch (e) {
-      console.error('Failed to fetch models', e);
-      setModels(null);
-    } finally {
-      setModelsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchModels();
-  }, []);
-
-  const fetchModelInfo = async () => {
-    setModelInfoLoading(true);
-    try {
-      const res = await fetch('/api/inference/model-info', { cache: 'no-store' });
-      const j = await res.json();
-      setModelInfo({ ...j });
-      setModelInfoCheckedAt(new Date().toISOString());
-    } catch (e) {
-      console.error('Failed to fetch model-info', e);
-      setModelInfo(null);
-    } finally {
-      setModelInfoLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchModelInfo();
-  }, []);
-
-  // poll model-info periodically for live status
-  useEffect(() => {
-    const id = setInterval(() => {
-      fetchModelInfo();
-    }, 10000);
-    return () => clearInterval(id);
-  }, []);
-
-  // connect to server-sent events for continuous alerts with reconnect
+  /* ── SSE: alerts ── */
   useEffect(() => {
     let es: EventSource | null = null;
-    let reconnectTimer: any = null;
-
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const connect = () => {
       try {
-        es = new EventSource('/api/alerts');
-
-        es.onopen = () => {
-          console.info('SSE connected');
-        };
-
+        es = new EventSource("/api/alerts");
         es.onmessage = async (ev) => {
           try {
             const data = JSON.parse(ev.data);
-            if (data?.results) {
-              // enhance any result missing entry/stop/target by fetching full signal details
-              const enhancedResults = await Promise.all(
-                data.results.map(async (r: any) => {
-                  const missingEntry = r.entryPrice == null && r.entry == null;
-                  const missingStop = r.stopLoss == null && r.stop == null;
-                  const missingTarget = r.targetPrice == null && r.target == null;
-                  if ((missingEntry || missingStop || missingTarget) && r.symbol) {
-                    try {
-                      const resp = await fetch(`/api/signal?symbol=${encodeURIComponent(r.symbol)}`);
-                      if (resp.ok) {
-                        const j = await resp.json();
-                        return {
-                          ...r,
-                          entryPrice: r.entryPrice ?? j.entryPrice ?? j.entry ?? null,
-                          stopLoss: r.stopLoss ?? j.stopLoss ?? j.stop ?? null,
-                          targetPrice: r.targetPrice ?? j.targetPrice ?? j.target ?? null,
-                          signal: r.signal ?? j.signal ?? r.signal,
-                          name: r.name ?? j.name ?? r.name,
-                        };
-                      }
-                    } catch (e) {
-                      // ignore fetch error and keep original r
-                      console.error('Failed to fetch signal details for alert', r.symbol, e);
+            if (!data?.results) return;
+            // enrich missing entry/stop/target
+            const enhanced: AlertResult[] = await Promise.all(
+              data.results.map(async (r: AlertResult) => {
+                if (r.entryPrice == null && r.entry == null && r.symbol) {
+                  try {
+                    const resp = await fetch(`/api/signal?symbol=${encodeURIComponent(r.symbol)}`);
+                    if (resp.ok) {
+                      const j = await resp.json();
+                      return { ...r, entryPrice: j.entryPrice ?? j.entry, stopLoss: j.stopLoss ?? j.stop, targetPrice: j.targetPrice ?? j.target, signal: r.signal ?? j.signal, name: r.name ?? j.name };
                     }
-                  }
-                  return r;
-                })
-              );
-
-              const enhanced = { ...data, results: enhancedResults };
-              setAlerts((prev) => [enhanced, ...prev].slice(0, 40));
-              // show a small toast for the first signal
-              const first = enhanced.results && enhanced.results[0];
-              if (first) setToast({ message: `${first.symbol} -> ${first.signal}`, type: first.signal === 'BUY' ? 'success' : 'info' });
-            }
-          } catch (e) {
-            console.error('Failed parse SSE', e);
-          }
+                  } catch { /* */ }
+                }
+                return r;
+              })
+            );
+            setAlerts((prev) => [{ ...data, results: enhanced }, ...prev].slice(0, 60));
+            beep();
+            const f = enhanced[0];
+            if (f) showToast(`${f.signal} ${f.symbol} Entry ${INR(f.entryPrice ?? f.entry)} SL ${INR(f.stopLoss ?? f.stop)} Tgt ${INR(f.targetPrice ?? f.target)}`, f.signal === "BUY" ? "success" : "error");
+          } catch { /* */ }
         };
-
-        es.onerror = (err) => {
-          console.error('SSE error', err);
-          // Do not forcibly close - allow EventSource auto-reconnect.
-          try {
-            if (es && (es as any).readyState === EventSource.CLOSED) {
-              reconnectTimer = setTimeout(() => {
-                try { es?.close(); } catch (e) {}
-                connect();
-              }, 3000);
-            }
-          } catch (e) {
-            console.error('SSE reconnect check failed', e);
-          }
+        es.onerror = () => {
+          if (es && es.readyState === EventSource.CLOSED) timer = setTimeout(connect, 3000);
         };
-      } catch (e) {
-        console.error('Failed to connect SSE', e);
-        reconnectTimer = setTimeout(connect, 3000);
-      }
+      } catch { timer = setTimeout(connect, 3000); }
     };
-
     connect();
+    return () => { if (timer) clearTimeout(timer); try { es?.close(); } catch { /* */ } };
+  }, [beep]);
 
-    return () => {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      try { es?.close(); } catch (e) {}
-    };
-  }, []);
+  const showToast = (msg: string, type: string) => setToast({ msg, type });
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 5000); return () => clearTimeout(t); }, [toast]);
 
-  const displaySignals = signals.map((s) => ({
-    symbol: s.symbol,
-    name: s.name,
-    currentPrice: s.entryPrice ?? s.currentPrice ?? null,
-    signal: s.signal,
-    entryPrice: s.entryPrice ?? null,
-    stopLoss: s.stopLoss ?? null,
-    targetPrice: s.targetPrice ?? null,
-    trailingStop: s.trailingStop ?? null,
-    strength: s.strength ?? 0,
-    confidence: s.confidence ?? 0,
-    reason: s.reason ?? '',
-    fnoRecommendation: s.fnoRecommendation ?? null,
-    indicators: s.indicators ?? null,
-    timestamp: s.timestamp ?? null,
-  })).sort((a, b) => {
-    // Sort by strength desc, then confidence desc
-    if (b.strength !== a.strength) return b.strength - a.strength;
-    return b.confidence - a.confidence;
-  });
-
-  // actionable signals only (ready to BUY / SELL / EXIT)
-  const actionableSignals = displaySignals.filter((d) => ['BUY', 'SELL', 'EXIT'].includes(String(d.signal).toUpperCase()));
-
-  useEffect(() => {
-    // prefer an actionable symbol for backtest, otherwise use the first available signal
-    const defaultSymbol = actionableSignals[0]?.symbol ?? displaySignals[0]?.symbol;
-    if (defaultSymbol) setBacktestSymbol(defaultSymbol);
-  }, [displaySignals]);
-
-  const runBacktest = async () => {
-    setToast({ message: 'Running backtest...', type: 'info' });
-    try {
-      const resp = await fetch('/api/backtest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: [backtestSymbol], startDate: btStart || undefined, endDate: btEnd || undefined, mode: 'signal', startingCapital: startingCapitalInput, riskPerTradePct: riskPerTradeInput }),
-      });
-      const json = await resp.json();
-      if (json?.results) {
-        setBacktestResults(json.results);
-        setToast({ message: 'Backtest completed', type: 'success' });
-      } else {
-        setToast({ message: 'Backtest failed', type: 'error' });
+  /* ── expand row → fetch strikes ── */
+  const toggleRow = useCallback(
+    async (sym: string) => {
+      if (expandedSym === sym) { setExpandedSym(null); return; }
+      setExpandedSym(sym);
+      if (!strikesCache[sym]) {
+        setStrikesLoading(sym);
+        try {
+          const r = await fetch(`/api/strikes?symbol=${encodeURIComponent(sym)}`);
+          if (r.ok) { const d = await r.json(); setStrikesCache((p) => ({ ...p, [sym]: d })); }
+        } catch { /* */ } finally { setStrikesLoading(null); }
       }
-    } catch (e) {
-      setToast({ message: 'Backtest request failed', type: 'error' });
-    }
-  };
+    },
+    [expandedSym, strikesCache]
+  );
 
-  const handleSelect = async (row: any) => {
-    try {
-      setModalOpen(true);
-      // fetch fresh signal + history from server
-      const [sResp, stResp, ocResp] = await Promise.all([
-        fetch(`/api/signal?symbol=${encodeURIComponent(row.symbol)}`),
-        fetch(`/api/strikes?symbol=${encodeURIComponent(row.symbol)}`),
-        fetch(`/api/optionchain?symbol=${encodeURIComponent(row.symbol)}&side=CALL&targetDelta=0.3&maxPremium=99999`),
-      ]);
-      const sJson = await sResp.json();
-      const stJson = await stResp.json();
-      const ocJson = await ocResp.json();
-      const sig = sJson?.signal ?? row;
-      if (sJson?.hist) sig.hist = sJson.hist;
-      sig.strikes = stJson?.strikes ?? null;
-      sig.recommendation = stJson?.recommendation ?? null;
-      sig.optionchain = ocJson ?? null;
-      setSelectedSignal(sig);
-
-      // fetch ML prediction for this symbol
-      setPredictionLoading(true);
+  /* ── force refresh ── */
+  const forceRefresh = () => {
+    if (streamRef.current) try { streamRef.current.close(); } catch { /* */ }
+    streamRef.current = null;
+    const es = new EventSource("/api/stream");
+    streamRef.current = es;
+    es.addEventListener("indices", (ev: MessageEvent) => {
       try {
-        const pResp = await fetch(`/api/predict?symbol=${encodeURIComponent(row.symbol)}`);
-        const pJson = await pResp.json();
-        setPrediction(pJson);
-      } catch (e) {
-        console.error('predict fetch failed', e);
-        setPrediction(null);
-      } finally {
-        setPredictionLoading(false);
-      }
-
-      // initialize option UI with returned data
-      if (ocJson?.side) setOptionSide((ocJson.side || 'CALL') as 'CALL' | 'PUT');
-      if (ocJson?.targetDelta) setTargetDelta(Number(ocJson.targetDelta) || 0.3);
-      if (ocJson?.best) setOptionBest(ocJson.best);
-      if (ocJson?.candidates) setOptionCandidates(ocJson.candidates.slice(0,50));
-    } catch (e) {
-      console.error('Failed to fetch symbol signal', e);
-      setSelectedSignal(row);
-      setModalOpen(true);
-    }
+        const { indices: fresh, ts } = JSON.parse(ev.data);
+        setIndices((prev) => prev.map((idx) => {
+          const m = (fresh ?? []).find((f: IndexData) => f.sym === idx.sym || f.id === idx.id);
+          return m ? { ...idx, price: m.price != null ? Number(m.price) : idx.price, change: m.change != null ? Number(m.change) : idx.change } : idx;
+        }));
+        setLastRefresh(new Date(ts).toLocaleTimeString());
+      } catch { /* */ }
+    });
+    es.addEventListener("signals", (ev: MessageEvent) => { try { setSignals(JSON.parse(ev.data).results ?? []); setSignalsLoading(false); } catch { /* */ } });
+    es.onerror = () => { es.close(); };
   };
 
-  const queryOptionChain = async (side?: string, delta?: number, maxP?: number, days?: number) => {
-    if (!selectedSignal) return;
-    setOptionLoading(true);
-    try {
-      const url = `/api/optionchain?symbol=${encodeURIComponent(selectedSignal.symbol)}&side=${encodeURIComponent(side ?? optionSide)}&targetDelta=${encodeURIComponent(String(delta ?? targetDelta))}&maxPremium=${encodeURIComponent(String(maxP ?? maxPremium))}&days=${encodeURIComponent(String(days ?? daysToExpiry))}`;
-      const resp = await fetch(url);
-      const json = await resp.json();
-      if (json?.error) {
-        setOptionBest(null);
-        setOptionCandidates(null);
-        setToast({ message: `Option chain: ${json.error}`, type: 'error' });
-      } else {
-        setOptionBest(json?.best ?? null);
-        setOptionCandidates(json?.candidates ?? null);
-      }
-    } catch (e) {
-      console.error('optionchain query failed', e);
-      setOptionBest(null);
-      setOptionCandidates(null);
-      setToast({ message: 'Failed to fetch option chain', type: 'error' });
-    } finally {
-      setOptionLoading(false);
-    }
-  };
+  /* ── derived data ── */
+  const processed: Signal[] = signals
+    .map((s) => ({
+      symbol: s.symbol,
+      name: s.name,
+      signal: s.signal,
+      currentPrice: s.entryPrice ?? s.currentPrice ?? null,
+      entryPrice: s.entryPrice ?? null,
+      stopLoss: s.stopLoss ?? null,
+      targetPrice: s.targetPrice ?? null,
+      trailingStop: s.trailingStop ?? null,
+      strength: s.strength ?? 0,
+      confidence: s.confidence ?? 0,
+      reason: s.reason ?? "",
+      fnoRecommendation: s.fnoRecommendation ?? null,
+      timestamp: s.timestamp ?? null,
+    }))
+    .sort((a, b) => {
+      const ord: Record<string, number> = { BUY: 0, SELL: 1, EXIT: 2 };
+      const ao = ord[String(a.signal).toUpperCase()] ?? 3;
+      const bo = ord[String(b.signal).toUpperCase()] ?? 3;
+      return ao !== bo ? ao - bo : b.strength - a.strength;
+    });
 
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4000);
-    return () => clearTimeout(t);
-  }, [toast]);
+  const actionable = processed.filter((s) => ["BUY", "SELL", "EXIT"].includes(String(s.signal).toUpperCase()));
+  const indiaIdx = indices.filter((i) => INDIA_IDS.includes(i.id));
+  const globalIdx = indices.filter((i) => GLOBAL_IDS.includes(i.id));
 
+  /* ═══════════════════════ RENDER ═══════════════════════ */
   return (
-    <div className="p-6 space-y-8">
-      <div className="flex items-center justify-between">
-        <div className={`text-left py-3 px-4 rounded-2xl font-medium text-lg flex-1 ${isMarketOpen ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
-          {marketStatus}
-          {lastRefresh && <span className="text-xs ml-3 opacity-60">Last: {lastRefresh}</span>}
+    <div className="px-2 sm:px-3 py-2 space-y-3 sm:space-y-4 text-sm">
+
+      {/* ━━━ TOP HEADER ━━━ */}
+      <header className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <h1 className="text-base sm:text-lg font-extrabold tracking-tight">⚡ ProfitForce</h1>
+          <span className={`px-2 sm:px-3 py-1 rounded-full text-[10px] sm:text-xs font-bold ${isMarketOpen ? "bg-green-500/20 text-green-400 ring-1 ring-green-500/40" : "bg-red-500/20 text-red-400 ring-1 ring-red-500/40"}`}>
+            <span className={`inline-block w-2 h-2 rounded-full mr-1 ${isMarketOpen ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
+            {marketStatus}
+          </span>
+          {lastRefresh && <span className="text-[10px] text-white/40">Updated {lastRefresh}</span>}
         </div>
-        <div className="ml-4 flex items-center gap-3">
-          <div className="text-center">
-            <button onClick={() => setAutoTradeEnabled(!autoTradeEnabled)} className={`px-4 py-2 rounded-full text-sm font-bold ${autoTradeEnabled ? 'bg-emerald-500 text-black animate-pulse' : 'bg-gray-600 text-white'}`}>
-              {autoTradeEnabled ? '⚡ Auto-Trade ON' : '◻ Auto-Trade OFF'}
-            </button>
-            {positions.length > 0 && <div className="text-xs text-emerald-400 mt-1">{positions.length} open position{positions.length > 1 ? 's' : ''}</div>}
+        <div className="flex items-center gap-1">
+          <button onClick={() => setSoundOn(!soundOn)} className="p-1.5 rounded hover:bg-white/10 text-white/50 text-xs" title="Toggle sound">
+            {soundOn ? "🔔" : "🔕"}
+          </button>
+          <button onClick={forceRefresh} className="p-1.5 rounded hover:bg-white/10 text-white/50 text-xs" title="Refresh">↻</button>
+        </div>
+      </header>
+
+      {/* ━━━ INDIA INDICES ━━━ */}
+      <section>
+        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">India Markets</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
+          {indiaIdx.map((idx) => <IndexCard key={idx.id} idx={idx} fl={flash[idx.id]} />)}
+        </div>
+      </section>
+
+      {/* ━━━ GLOBAL INDICES ━━━ */}
+      <section>
+        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">Global Markets</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+          {globalIdx.map((idx) => <IndexCardSmall key={idx.id} idx={idx} fl={flash[idx.id]} />)}
+        </div>
+      </section>
+
+      {/* ━━━ INDEX OPTIONS: NIFTY / SENSEX / BANKNIFTY ━━━ */}
+      <section>
+        <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">📈 Index Options — Strike Prices & Trade Calls</h2>
+        <div className="space-y-3">
+          {indexOptions.map((opt) => (
+            <IndexOptionCard key={opt.sym} opt={opt} />
+          ))}
+        </div>
+      </section>
+
+      {/* ━━━ MAIN CONTENT ━━━ */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+        {/* ── SIGNALS TABLE (2/3) ── */}
+        <section className="lg:col-span-2 space-y-2">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-bold flex items-center gap-2">
+              📊 Options Signals
+              {actionable.length > 0 && (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400">
+                  {actionable.length} actionable
+                </span>
+              )}
+            </h2>
+            <span className="text-[10px] text-[var(--bf-muted)]">{isMarketOpen ? "Live every 10s" : "Last close"}</span>
           </div>
-          <div className="text-right">
-            <button onClick={() => document.getElementById('models-panel')?.scrollIntoView({ behavior: 'smooth' })} className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${modelInfo?.model_loaded ? 'bg-emerald-400 text-black' : modelInfo ? 'bg-rose-400 text-black' : 'bg-gray-500 text-white'}`}>
-              {modelInfo?.model_loaded ? 'Model: Loaded' : modelInfo ? 'Model: None' : 'Model: Unknown'}
-            </button>
-            <div className="text-xs text-[--bf-muted] mt-1">{modelInfoCheckedAt ? `Checked ${new Date(modelInfoCheckedAt).toLocaleTimeString()}` : 'Not checked'}</div>
-          </div>
-        </div>
-      </div>
 
-      <div>
-        <h3 className="text-md font-semibold text-[--bf-muted]">India Markets</h3>
-        <div className="grid grid-cols-3 gap-8 mt-3">
-          {allIndices
-            .filter((i) => ['NIFTY', 'SENSEX', 'BANKNIFTY', '^NSEI', '^BSESN', '^NSEBANK'].includes(i.id ?? i.sym))
-            .map((idx, i) => {
-              const isUp = idx.change != null && idx.change >= 0;
-              const points = idx.price != null && idx.change != null ? (idx.price * idx.change) / 100 : null;
-              const flash = priceFlash[idx.id ?? idx.sym];
-              return (
-                <div key={i} className={`text-center p-8 rounded-3xl border transition-all duration-300 ${flash === 'up' ? 'ring-2 ring-emerald-400 bg-emerald-900/20' : flash === 'down' ? 'ring-2 ring-rose-400 bg-rose-900/20' : ''} ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/8' : 'border-rose-600 bg-gradient-to-br from-rose-900/8'}`}>
-                  <div className="text-sm text-[--bf-muted] mb-2">{idx.name}</div>
-                  <div className={`text-4xl font-extrabold tabular-nums transition-colors duration-300 ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
-                  <div className={`text-lg mt-2 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>
-                    {idx.change != null ? (isUp ? '↑' : '↓') : ''} {idx.change != null ? `${idx.change.toFixed(2)}%` : ''} {points != null ? `(${isUp ? '+' : ''}${points.toFixed(2)} pts)` : ''}
-                  </div>
-                </div>
-              );
-            })}
-        </div>
-
-        <h3 className="text-md font-semibold text-[--bf-muted] mt-8">Global Markets</h3>
-        <div className="grid grid-cols-3 gap-8 mt-3">
-          {allIndices
-            .filter((i) => !['NIFTY', 'SENSEX', 'BANKNIFTY', '^NSEI', '^BSESN', '^NSEBANK'].includes(i.id ?? i.sym))
-            .map((idx, i) => {
-              const isUp = idx.change != null && idx.change >= 0;
-              const points = idx.price != null && idx.change != null ? (idx.price * idx.change) / 100 : null;
-              const flash = priceFlash[idx.id ?? idx.sym];
-              return (
-                <div key={i} className={`text-center p-6 rounded-2xl border transition-all duration-300 ${flash === 'up' ? 'ring-2 ring-emerald-400 bg-emerald-900/20' : flash === 'down' ? 'ring-2 ring-rose-400 bg-rose-900/20' : ''} ${isUp ? 'border-emerald-600 bg-gradient-to-br from-emerald-900/6' : 'border-rose-600 bg-gradient-to-br from-rose-900/6'}`}>
-                  <div className="text-sm text-[--bf-muted] mb-1">{idx.name}</div>
-                  <div className={`text-3xl font-bold tabular-nums transition-colors duration-300 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>{idx.price != null ? idx.price.toFixed(2) : '—'}</div>
-                  <div className={`text-sm mt-1 ${isUp ? 'text-emerald-300' : 'text-rose-300'}`}>
-                    {idx.change != null ? (isUp ? '↑' : '↓') : ''} {idx.change != null ? `${idx.change.toFixed(2)}%` : ''} {points != null ? `(${isUp ? '+' : ''}${points.toFixed(2)} pts)` : ''}
-                  </div>
-                </div>
-              );
-            })}
-        </div>
-      </div>
-
-      <div className="text-center text-gray-400 text-sm">
-        {isMarketOpen ? 'Live streaming — Indices every 3s, Signals every 10s' : 'Showing last available close prices'}
-        <button onClick={() => {
-          // Force reconnect SSE for instant refresh
-          if (streamRef.current) { try { streamRef.current.close(); } catch {} streamRef.current = null; }
-          const es = new EventSource('/api/stream');
-          streamRef.current = es;
-          es.addEventListener('indices', (ev: any) => { try { const { indices: fresh, ts } = JSON.parse(ev.data); setAllIndices((prev: any[]) => prev.map((idx: any) => { const found = (fresh ?? []).find((f: any) => f.sym === idx.sym || f.name === idx.name || f.id === idx.id); return { ...idx, price: found?.price != null ? Number(found.price) : idx.price, change: found?.change != null ? Number(found.change) : idx.change }; })); setLastRefresh(new Date(ts).toLocaleTimeString()); setLoading(false); } catch {} });
-          es.addEventListener('signals', (ev: any) => { try { const { results } = JSON.parse(ev.data); setSignals(results ?? []); setSignalsLoading(false); } catch {} });
-          es.onerror = () => { es.close(); };
-        }} className="ml-3 px-2 py-1 rounded bg-white/10 text-xs">↻ Refresh Now</button>
-      </div>
-
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold mb-3">Signals</h2>
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-[--bf-muted]">Backtest:</label>
-            <select value={backtestSymbol} onChange={(e) => setBacktestSymbol(e.target.value)} className="px-3 py-1 rounded bg-[#0b1220] text-white">
-              {displaySignals.map((d) => (
-                <option key={d.symbol} value={d.symbol}>
-                  {d.symbol}
-                </option>
-              ))}
-            </select>
-            <input value={btStart} onChange={(e) => setBtStart(e.target.value)} type="date" className="px-2 py-1 rounded bg-[#0b1220] text-white" />
-            <input value={btEnd} onChange={(e) => setBtEnd(e.target.value)} type="date" className="px-2 py-1 rounded bg-[#0b1220] text-white" />
-            <input value={startingCapitalInput} onChange={(e) => setStartingCapitalInput(Number(e.target.value))} type="number" className="w-28 px-2 py-1 rounded bg-[#0b1220] text-white" placeholder="Capital" />
-            <input value={riskPerTradeInput} onChange={(e) => setRiskPerTradeInput(Number(e.target.value))} type="number" step="0.001" className="w-24 px-2 py-1 rounded bg-[#0b1220] text-white" placeholder="Risk %" />
-            <button onClick={runBacktest} className="px-3 py-2 rounded bg-gradient-to-r from-emerald-400 to-teal-400 text-black font-semibold">Run</button>
-          </div>
-        </div>
-
-        <div>
-          <SignalTable data={displaySignals} loading={signalsLoading} onSelect={handleSelect} />
-        </div>
-
-        <div>
-          <h3 className="text-md font-semibold mt-6">Live Alerts</h3>
-          <div className="mt-2 max-h-48 overflow-y-auto text-sm text-[--bf-muted]">
-            {alerts.length === 0 && <div className="py-2">No recent alerts</div>}
-            {alerts.map((a, i) => (
-              <div key={i} className="py-1 border-b border-[#0f1724]">
-                <div className="text-xs text-[--bf-muted]">{new Date(a.ts).toLocaleTimeString()}</div>
-                {a.results && a.results.length > 0 ? (
-                  a.results.map((r: any, j: number) => {
-                    const sig = String(r.signal ?? '').toUpperCase();
-                    const badgeClass = sig === 'BUY' ? 'bg-emerald-400 text-black' : sig === 'SELL' ? 'bg-rose-400 text-black' : 'bg-gray-500 text-white';
-                    return (
-                      <div key={j} className="py-1">
-                        <div className="flex items-center gap-3">
-                          <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${badgeClass}`}>{sig || '—'}</div>
-                          <div className="font-medium">{r.symbol ?? '—'}{r.name ? ` — ${r.name}` : ''}</div>
-                        </div>
-                        <div className="text-xs text-[--bf-muted]">Entry: {r.entryPrice ?? r.entry ?? '—'} &nbsp; Stop: {r.stopLoss ?? r.stop ?? '—'} &nbsp; Target: {r.targetPrice ?? r.target ?? '—'}</div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="font-medium">No results</div>
-                )}
+          <div className="rounded-lg border border-white/8 overflow-hidden relative">
+            {signalsLoading && (
+              <div className="absolute inset-0 z-10 bg-black/60 flex items-center justify-center">
+                <div className="w-8 h-8 border-2 border-t-transparent border-emerald-400 rounded-full animate-spin" />
               </div>
-            ))}
-          </div>
-        </div>
+            )}
 
-        {/* Open Positions */}
-        {positions.length > 0 && (
-          <div className="mt-6">
-            <h3 className="text-md font-semibold">Open Positions ({positions.length})</h3>
-            <div className="mt-2 overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead><tr className="text-left text-[--bf-muted]"><th className="py-2">Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Qty</th></tr></thead>
-                <tbody>
-                  {positions.map((p: any, i: number) => (
-                    <tr key={i} className="border-t border-[#0f1724]">
-                      <td className="py-2 font-medium">{p.symbol}</td>
-                      <td className={`py-2 ${p.side === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}`}>{p.side}</td>
-                      <td className="py-2">₹{Number(p.entryPrice).toFixed(2)}</td>
-                      <td className="py-2 text-rose-400">₹{Number(p.stopLoss).toFixed(2)}</td>
-                      <td className="py-2 text-emerald-400">₹{Number(p.targetPrice).toFixed(2)}</td>
-                      <td className="py-2">{p.qty}</td>
-                    </tr>
-                  ))}
+            {/* Desktop */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-[var(--bf-muted)]">
+                    <th className="px-2 py-2 text-left font-medium">Symbol</th>
+                    <th className="px-2 py-2 text-center font-medium">Signal</th>
+                    <th className="px-2 py-2 text-right font-medium text-emerald-500">Entry ₹</th>
+                    <th className="px-2 py-2 text-right font-medium text-rose-500">Stop Loss ₹</th>
+                    <th className="px-2 py-2 text-right font-medium text-sky-500">Target ₹</th>
+                    <th className="px-2 py-2 text-center font-medium">F&O</th>
+                    <th className="px-2 py-2 text-center font-medium">R:R</th>
+                    <th className="px-2 py-2 text-center font-medium">Str</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {processed.map((row, i) => {
+                    const sig = String(row.signal).toUpperCase();
+                    const act = ["BUY", "SELL", "EXIT"].includes(sig);
+                    const exp = expandedSym === row.symbol;
+                    const e = Number(row.entryPrice ?? 0);
+                    const sl = Number(row.stopLoss ?? 0);
+                    const tgt = Number(row.targetPrice ?? 0);
+                    const rr = e && sl && tgt ? `1:${(Math.abs(tgt - e) / Math.abs(e - sl)).toFixed(1)}` : "—";
+
+                    return (
+                      <React.Fragment key={`${row.symbol}-${i}`}>
+                        <tr
+                          onClick={() => toggleRow(row.symbol)}
+                          className={`cursor-pointer transition-colors hover:bg-white/3 ${act ? "" : "opacity-50"} ${exp ? "bg-white/5" : ""}`}
+                        >
+                          <td className="px-2 py-2">
+                            <span className={`inline-block text-[10px] mr-1 transition-transform ${exp ? "rotate-90" : ""}`}>▶</span>
+                            <span className="font-semibold">{row.symbol}</span>
+                            {row.name && <div className="text-[9px] text-[var(--bf-muted)] ml-3">{row.name}</div>}
+                          </td>
+                          <td className="px-2 py-2 text-center"><Badge signal={row.signal} /></td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-emerald-400">{INR(row.entryPrice)}</td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-rose-400">{INR(row.stopLoss)}</td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-sky-400">{INR(row.targetPrice)}</td>
+                          <td className="px-2 py-2 text-center"><FnoBadge rec={row.fnoRecommendation} /></td>
+                          <td className="px-2 py-2 text-center font-bold text-amber-400">{rr}</td>
+                          <td className="px-2 py-2 text-center">
+                            <div className="inline-flex items-center gap-1">
+                              <div className="w-12 bg-white/5 rounded-full h-1 overflow-hidden">
+                                <div style={{ width: `${row.strength}%` }} className="h-full bg-gradient-to-r from-emerald-500 to-teal-400" />
+                              </div>
+                              <span className="text-[9px] text-[var(--bf-muted)]">{row.strength}%</span>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {/* ── EXPANDED: Strike prices ── */}
+                        {exp && (
+                          <tr>
+                            <td colSpan={8} className="p-0">
+                              <div className="bg-[#060e1a] border-t border-b border-white/8 p-3">
+                                {strikesLoading === row.symbol ? (
+                                  <div className="flex items-center justify-center py-4 gap-2 text-[var(--bf-muted)]">
+                                    <div className="w-4 h-4 border-2 border-t-transparent border-emerald-400 rounded-full animate-spin" />
+                                    Loading strikes…
+                                  </div>
+                                ) : strikesCache[row.symbol] ? (
+                                  <StrikePanel data={strikesCache[row.symbol]} signal={row} />
+                                ) : (
+                                  <div className="text-center py-3 text-[var(--bf-muted)]">No strike data</div>
+                                )}
+                                {row.reason && (
+                                  <p className="mt-2 text-[10px] text-[var(--bf-muted)] border-t border-white/5 pt-1">
+                                    <b>Why:</b> {row.reason}
+                                  </p>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                  {!signalsLoading && processed.length === 0 && (
+                    <tr><td colSpan={8} className="text-center py-6 text-[var(--bf-muted)]">Waiting for signals…</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
 
-        <div id="models-panel" className="mt-6">
-          <h3 className="text-md font-semibold">Models</h3>
-          <div className="mt-2 text-sm">
-              {modelsLoading && <div>Loading models…</div>}
-              {modelInfo && (
-                <div className="mb-3 p-3 rounded bg-white/5">
-                  <div className="text-sm text-[--bf-muted]">Loaded model</div>
-                  <div className="font-medium">{modelInfo.class ?? modelInfo.model_path ?? '—'}</div>
-                  {modelInfo.params_sample && <div className="text-xs text-[--bf-muted]">{Object.keys(modelInfo.params_sample).join(', ')}</div>}
-                </div>
-              )}
-            {!modelsLoading && (!models || models.length === 0) && <div className="py-2">No local models found. Run <code>python ml/api/create_example_model.py</code>.</div>}
-            {models && models.length > 0 && (
-              <div className="mt-2 space-y-2">
-                {models.map((m: any, i: number) => (
-                  <div key={i} className="flex items-center justify-between p-2 bg-white/3 rounded">
-                    <div>
-                      <div className="font-medium">{m.name || m}</div>
-                      <div className="text-xs text-[--bf-muted]">{m.mtime ? new Date(m.mtime).toLocaleString() : ''} {m.size ? `• ${Math.round(m.size/1024)} KB` : ''}</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <a className="px-2 py-1 rounded bg-white/5 text-sm" href={`/api/models/${encodeURIComponent(m.name || m)}`}>Download</a>
-                      <button onClick={async ()=>{
-                        try {
-                          setToast({ message: 'Setting active model…', type: 'info' });
-                          const r = await fetch('/api/models/swap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: m.name || m }) });
-                          const j = await r.json();
-                          if (r.ok) {
-                            setToast({ message: `Set active model: ${m.name || m}`, type: 'success' });
-                            fetchModels();
-                          } else {
-                            setToast({ message: `Failed: ${j?.error ?? 'unknown'}`, type: 'error' });
-                          }
-                        } catch (e) {
-                          setToast({ message: 'Set active failed', type: 'error' });
-                        }
-                      }} className="px-2 py-1 rounded bg-emerald-500 text-black text-sm">Set Active</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <SuperCharts items={displaySignals.slice(0,3)} />
-
-        {modalOpen && selectedSignal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/50" onClick={() => { setModalOpen(false); setSelectedSignal(null); }} />
-            <div className="relative w-11/12 md:w-3/4 lg:w-2/3 bg-[#071026] rounded-xl p-6 z-60">
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <h3 className="text-lg font-semibold">{selectedSignal.symbol}</h3>
-                  <div className="text-sm text-[--bf-muted]">Signal: {selectedSignal.signal}</div>
-                  <div className="mt-2">
-                    {predictionLoading && <div className="text-sm text-[--bf-muted]">Loading AI prediction…</div>}
-                    {prediction && !prediction.error && (
-                      <div className="text-sm">
-                        <div><strong>AI:</strong> {prediction.action} ({(prediction.confidence ?? prediction.prob_buy ?? 0).toString().slice(0,4)})</div>
-                        <div className="text-xs text-[--bf-muted]">Entry: {prediction.entry} Stop: {prediction.stop} Target: {prediction.target}</div>
-                        <button onClick={() => {
-                          setPredictionLoading(true);
-                          fetch(`/api/predict?symbol=${encodeURIComponent(selectedSignal.symbol)}`).then(r=>r.json()).then(j=>setPrediction(j)).catch(()=>{}).finally(()=>setPredictionLoading(false));
-                        }} className="mt-1 px-2 py-1 rounded bg-white/5 text-sm">Refresh AI</button>
-                      </div>
-                    )}
-                    {prediction && prediction.error && <div className="text-sm text-rose-400">Prediction error: {String(prediction.error)}</div>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-sm text-[--bf-muted]">Strength: {selectedSignal.strength}%</div>
-                  <button onClick={() => { setModalOpen(false); setSelectedSignal(null); }} className="px-3 py-1 rounded bg-white/5">Close</button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div className="lg:col-span-2">
-                  <SuperCharts items={[selectedSignal]} />
-                </div>
-                <div className="p-4 rounded-md bg-white/3">
-                  <div className="text-sm text-[--bf-muted] mb-2">Details</div>
-                  <div className="text-sm mb-1"><strong>Entry:</strong> {selectedSignal.entryPrice ?? '—'}</div>
-                  <div className="text-sm mb-1"><strong>Stop:</strong> {selectedSignal.stopLoss ?? '—'}</div>
-                  <div className="text-sm mb-1"><strong>Target:</strong> {selectedSignal.targetPrice ?? '—'}</div>
-                  <div className="text-sm mt-3 text-[--bf-muted]">{selectedSignal.reason}</div>
-                  <div className="mt-4">
-                    <div className="text-sm text-[--bf-muted] mb-2">Option Finder</div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-xs text-[--bf-muted] block mb-1">Side</label>
-                        <select value={optionSide} onChange={(e) => setOptionSide(e.target.value as any)} className="w-full px-2 py-1 bg-[#0b1220] rounded text-white">
-                          <option value="CALL">CALL</option>
-                          <option value="PUT">PUT</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-xs text-[--bf-muted] block mb-1">Target Delta</label>
-                        <input type="number" step="0.05" value={targetDelta} onChange={(e) => setTargetDelta(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      </div>
-                      <div>
-                        <label className="text-xs text-[--bf-muted] block mb-1">Max Premium (₹)</label>
-                        <input type="number" value={maxPremium} onChange={(e) => setMaxPremium(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      </div>
-                      <div>
-                        <label className="text-xs text-[--bf-muted] block mb-1">Days to Expiry</label>
-                        <input type="number" value={daysToExpiry} onChange={(e) => setDaysToExpiry(Number(e.target.value))} className="w-full px-2 py-1 rounded bg-[#0b1220] text-white" />
-                      </div>
-                    </div>
-                    <button onClick={() => queryOptionChain(optionSide, targetDelta, maxPremium, daysToExpiry)} className="mt-2 w-full px-3 py-2 rounded bg-emerald-500 text-black font-semibold">Find Best Strike</button>
-                    {optionLoading && <div className="text-sm text-[--bf-muted] mt-2">Searching options…</div>}
-                    {optionBest && (
-                      <div className="mt-3 p-3 bg-emerald-950/50 border border-emerald-800/40 rounded">
-                        <div className="text-sm font-semibold">Best Strike: <strong className="text-lg text-emerald-400">₹{Number(optionBest.strike).toLocaleString()}</strong>
-                          {optionBest.type && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-white/10">{optionBest.type}</span>}
-                          {optionBest.synthetic && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300">Calculated</span>}
-                        </div>
-                        <div className="text-xs text-[--bf-muted] mt-1">Delta: {optionBest.delta?.toFixed(3)} | IV: {(optionBest.iv||0).toFixed(1)}% | Days: {Math.round(optionBest.days ?? 0)}{optionBest.lastPrice != null ? ` | Premium: ₹${optionBest.lastPrice}` : ''}</div>
-                        <div className="mt-2">
-                          <button onClick={() => navigator.clipboard?.writeText(String(optionBest.strike))} className="px-2 py-1 rounded bg-white/10 text-xs">Copy Strike</button>
-                        </div>
-                      </div>
-                    )}
-                    {optionCandidates && optionCandidates.length > 0 && (
-                      <div className="mt-3 max-h-48 overflow-y-auto text-sm">
-                        <table className="w-full text-sm">
-                          <thead><tr className="text-[--bf-muted]"><th className="text-left px-2">Strike</th><th>Type</th><th>Premium</th><th>Delta</th><th>IV</th><th>Days</th><th>Score</th></tr></thead>
-                          <tbody>
-                            {optionCandidates.map((c: any, i: number) => (
-                              <tr key={i} className={`border-t border-white/5 ${i === 0 ? 'bg-emerald-900/20' : ''}`}>
-                                <td className="px-2 py-1 font-mono font-semibold">₹{Number(c.strike).toLocaleString()}</td>
-                                <td className="px-2 py-1 text-center text-xs">{c.type ?? '—'}</td>
-                                <td className="px-2 py-1 text-center">{c.lastPrice != null ? `₹${c.lastPrice}` : '—'}</td>
-                                <td className="px-2 py-1 text-center">{c.delta?.toFixed(3)}</td>
-                                <td className="px-2 py-1 text-center">{((c.iv||0)*100).toFixed(1)}%</td>
-                                <td className="px-2 py-1 text-center">{Math.round(c.days||0)}</td>
-                                <td className="px-2 py-1 text-center">{Number(c.score).toFixed(1)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {backtestResults && (
-          <div className="mt-6">
-            <h3 className="text-md font-semibold">Backtest Results</h3>
-            <div className="mt-3 space-y-3">
-              {backtestResults.map((r: any, i: number) => {
-                const key = r.symbol ?? `res-${i}`;
-                const expanded = !!expandedBacktests[key];
-                const summary = r.summary ?? r;
+            {/* Mobile */}
+            <div className="md:hidden divide-y divide-white/5">
+              {processed.map((row, i) => {
+                const sig = String(row.signal).toUpperCase();
+                const act = ["BUY", "SELL", "EXIT"].includes(sig);
+                const e = Number(row.entryPrice ?? 0);
+                const sl = Number(row.stopLoss ?? 0);
+                const tgt = Number(row.targetPrice ?? 0);
+                const rr = e && sl && tgt ? `1:${(Math.abs(tgt - e) / Math.abs(e - sl)).toFixed(1)}` : "—";
                 return (
-                  <div key={key} className="p-3 rounded bg-white/3 border">
-                    <div className="flex items-center justify-between">
+                  <div key={`m-${row.symbol}-${i}`} className={`p-3 ${act ? "" : "opacity-50"}`}>
+                    <div className="flex items-start justify-between gap-2 mb-1">
                       <div>
-                        <div className="font-semibold">{r.symbol ?? r.name}</div>
-                        <div className="text-sm text-[--bf-muted]">ROI: {r.roi ?? (summary.avgReturn ?? '—')}% — Trades: {summary.trades ?? summary.closedTrades ?? (r.trades?.length ?? 0)}</div>
+                        <div className="font-bold">{row.symbol}</div>
+                        {row.name && <div className="text-[9px] text-[var(--bf-muted)]">{row.name}</div>}
                       </div>
-                      <div className="text-right">
-                        <div className="text-sm">Start: {r.startingCapital ?? '—'}</div>
-                        <div className="text-sm">End: {r.endingCapital ?? '—'}</div>
-                        <button onClick={() => setExpandedBacktests(prev => ({ ...prev, [key]: !prev[key] }))} className="mt-2 px-2 py-1 rounded bg-white/5 text-sm">{expanded ? 'Hide trades' : 'Show trades'}</button>
-                      </div>
+                      <Badge signal={row.signal} />
                     </div>
-
-                    {expanded && (
-                      <div className="mt-3 overflow-x-auto">
-                        <table className="w-full text-sm table-auto">
-                          <thead>
-                            <tr className="text-left text-[--bf-muted]"><th>Date</th><th>Type</th><th>Entry</th><th>Exit</th><th>Shares</th><th>P&L</th><th>P&L %</th></tr>
-                          </thead>
-                          <tbody>
-                            {(r.trades || []).map((t: any, j: number) => (
-                              <tr key={j} className="border-t">
-                                <td className="py-2">{t.date ?? t.entryDate ?? '—'}</td>
-                                <td className="py-2">{t.type ?? (t.exitType === 'STOP' ? 'SELL' : 'BUY')}</td>
-                                <td className="py-2">{t.entry != null ? Number(t.entry).toFixed(2) : (t.entryPrice != null ? Number(t.entryPrice).toFixed(2) : '—')}</td>
-                                <td className="py-2">{t.exit != null ? Number(t.exit).toFixed(2) : (t.exitPrice != null ? Number(t.exitPrice).toFixed(2) : '—')}</td>
-                                <td className="py-2">{t.shares ?? '—'}</td>
-                                <td className="py-2">{t.pnl != null ? Number(t.pnl).toFixed(2) : (t.ret != null ? Number(t.ret).toFixed(2) : '—')}</td>
-                                <td className="py-2">{t.pnlPct != null ? `${t.pnlPct}%` : (t.ret != null ? `${t.ret}%` : '—')}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                    <div className="grid grid-cols-3 gap-2">
+                      <div><div className="text-[9px] text-[var(--bf-muted)]">Entry</div><div className="font-mono font-bold text-green-400">{INR(row.entryPrice)}</div></div>
+                      <div><div className="text-[9px] text-[var(--bf-muted)]">Stop Loss</div><div className="font-mono font-bold text-red-400">{INR(row.stopLoss)}</div></div>
+                      <div><div className="text-[9px] text-[var(--bf-muted)]">Target</div><div className="font-mono font-bold text-cyan-400">{INR(row.targetPrice)}</div></div>
+                    </div>
+                    <div className="flex items-center justify-between mt-1 text-[9px] text-[var(--bf-muted)]">
+                      <FnoBadge rec={row.fnoRecommendation} />
+                      <span>R:R {rr}</span>
+                      <span>{row.strength}%</span>
+                    </div>
                   </div>
                 );
               })}
             </div>
           </div>
-        )}
+        </section>
+
+        {/* ── LIVE ALERTS PANEL (1/3) ── */}
+        <section className="space-y-2">
+          <h2 className="text-sm sm:text-base font-extrabold flex items-center gap-2 text-white">
+            🔔 Live Alerts
+            <span className="text-[10px] sm:text-xs text-white/50 font-normal">{alerts.length}</span>
+          </h2>
+
+          <div className="rounded-lg border border-white/8 overflow-hidden">
+            <div className="max-h-[calc(100vh-340px)] min-h-[200px] sm:min-h-[300px] overflow-y-auto divide-y divide-white/5">
+              {alerts.length === 0 && (
+                <div className="p-4 sm:p-8 text-center text-[var(--bf-muted)]">
+                  <div className="text-xl sm:text-2xl mb-1 opacity-30">🔔</div>
+                  Waiting for trading alerts…<br />
+                  <span className="text-[10px]">Alerts fire every 30s when actionable signals appear</span>
+                </div>
+              )}
+              {alerts.map((a, i) => (
+                <div key={i} className="p-2 sm:p-3 hover:bg-white/5 transition-colors">
+                  <div className="flex items-center justify-between mb-1 sm:mb-1.5">
+                    <span className="text-[10px] sm:text-xs text-white/50 font-medium">{new Date(a.ts).toLocaleTimeString()}</span>
+                    <span className="text-[10px] sm:text-xs text-white/40">{timeAgo(a.ts)}</span>
+                  </div>
+                  {a.results?.map((r, j) => {
+                    const aSpot = Number(r.entryPrice ?? r.entry ?? 0);
+                    const dir = String(r.signal).toUpperCase();
+                    const isBuyAlert = dir === "BUY";
+                    const isSellAlert = dir === "SELL";
+                    const sym = r.symbol ?? "";
+                    const shortIdx = indexShortName(r.name ?? sym);
+                    const isCall = isBuyAlert;
+                    const strikeVal = aSpot > 0 ? Math.round(aSpot / 50) * 50 + (isBuyAlert ? 50 : -50) : 0;
+                    const premium = aSpot > 0 ? estimatePremium(aSpot, strikeVal, isCall) : 0;
+                    const opts = estimateOptionSLTarget(premium, 60);
+                    const lo = Math.floor(premium / 5) * 5 || Math.floor(premium);
+                    const hi = lo + 5;
+                    return (
+                      <div key={j} className={`mb-2 last:mb-0 rounded-xl p-2 sm:p-3 border-2 font-mono text-xs sm:text-sm leading-relaxed ${
+                        isBuyAlert ? "border-green-500/70 bg-green-950/50" : isSellAlert ? "border-red-500/70 bg-red-950/50" : "border-yellow-500/50 bg-yellow-950/30"
+                      }`}>
+                        <div className="flex items-center gap-2 mb-1 sm:mb-1.5">
+                          <Badge signal={r.signal} />
+                        </div>
+                        {aSpot > 0 && (isBuyAlert || isSellAlert) ? (
+                          <>
+                            <div className={`font-extrabold text-xs sm:text-base ${isBuyAlert ? "text-green-300" : "text-red-300"}`}>
+                              🚀 {dir} {shortIdx} {strikeVal}{isBuyAlert ? "CE" : "PE"} @ {lo}-{hi}
+                            </div>
+                            <div className="text-red-400 font-extrabold mt-1">🛑 SL {opts.sl}</div>
+                            <div className="text-cyan-300 font-extrabold">🎯 TGT {opts.t1}/{opts.t2}/{opts.t3}++++</div>
+                            <div className="text-yellow-300 font-extrabold">📦 LOT {LOT_SIZES.join("/")}</div>
+                          </>
+                        ) : (
+                          <div className="text-yellow-300 font-bold">{dir} {sym} @ {INR(aSpot)}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
       </div>
 
+      {/* ━━━ TOAST ━━━ */}
       {toast && (
-        <div className="fixed right-6 top-6 z-50">
-          <div className={`px-4 py-2 rounded ${toast.type === 'success' ? 'bg-emerald-600' : toast.type === 'error' ? 'bg-rose-600' : 'bg-sky-600'} text-black`}>{toast.message}</div>
+        <div className="fixed right-3 top-3 z-50 max-w-sm">
+          <div className={`px-5 py-3 rounded-xl shadow-2xl text-sm font-bold border-2
+            ${toast.type === "success" ? "bg-green-900 border-green-400 text-green-200 shadow-green-500/30" : toast.type === "error" ? "bg-red-900 border-red-400 text-red-200 shadow-red-500/30" : "bg-cyan-900 border-cyan-400 text-cyan-200 shadow-cyan-500/30"}`}>
+            {toast.msg}
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─────────────────── Index Cards ─────────────────── */
+
+function IndexCard({ idx, fl }: { idx: IndexData; fl?: "up" | "down" }) {
+  const up = (idx.change ?? 0) >= 0;
+  const p = pts(idx.price, idx.change);
+  return (
+    <div className={`rounded-xl p-4 border-2 transition-all duration-300 ${fl === "up" ? "ring-2 ring-green-400 scale-[1.02]" : fl === "down" ? "ring-2 ring-red-400 scale-[1.02]" : ""} ${up ? "border-green-500/50 bg-gradient-to-br from-green-950/40 to-[#071026]" : "border-red-500/50 bg-gradient-to-br from-red-950/40 to-[#071026]"}`}>
+      <div className="text-xs font-bold text-white/80 tracking-wider">{idx.name}</div>
+      <div className={`text-2xl font-extrabold tabular-nums mt-0.5 ${up ? "text-green-400" : "text-red-400"}`}>
+        {idx.price != null ? idx.price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}
+      </div>
+      <div className={`text-sm mt-0.5 flex items-center gap-1 font-bold ${up ? "text-green-300" : "text-red-300"}`}>
+        <span>{up ? "▲" : "▼"}</span>
+        <span>{pct(idx.change)}</span>
+        {p != null && <span className="text-xs">({up ? "+" : ""}{p.toFixed(2)} pts)</span>}
+      </div>
+    </div>
+  );
+}
+
+function IndexCardSmall({ idx, fl }: { idx: IndexData; fl?: "up" | "down" }) {
+  const up = (idx.change ?? 0) >= 0;
+  return (
+    <div className={`rounded-lg p-2.5 border transition-all duration-300 ${fl === "up" ? "ring-1 ring-green-400" : fl === "down" ? "ring-1 ring-red-400" : ""} ${up ? "border-green-600/40 bg-green-950/20" : "border-red-600/40 bg-red-950/20"}`}>
+      <div className="text-[10px] text-white/70 truncate font-medium">{idx.name}</div>
+      <div className={`text-sm font-extrabold tabular-nums ${up ? "text-green-400" : "text-red-400"}`}>
+        {idx.price != null ? idx.price.toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"}
+      </div>
+      <div className={`text-xs font-bold ${up ? "text-green-300" : "text-red-300"}`}>
+        {up ? "▲" : "▼"} {pct(idx.change)}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────── Strike Panel (expanded) ─────────────────── */
+
+function StrikePanel({ data, signal }: { data: StrikesData; signal: Signal }) {
+  const { strikes, recommendation: rec } = data;
+  const list = strikes?.strikes ?? [];
+  const atm = strikes?.atm ?? 0;
+  const underlying = strikes?.price ?? Number(signal.currentPrice ?? signal.entryPrice ?? 0);
+  const sig = String(signal.signal).toUpperCase();
+  const isBull = sig === "BUY";
+  const isBear = sig === "SELL";
+
+  const eP = Number(signal.entryPrice ?? 0);
+  const sP = Number(signal.stopLoss ?? 0);
+  const tP = Number(signal.targetPrice ?? 0);
+
+  return (
+    <div className="space-y-2">
+      {/* ── ACTION BANNER ── */}
+      <div className={`flex items-center gap-3 p-3 rounded-lg ${isBull ? "bg-emerald-950/60 border border-emerald-700/40" : isBear ? "bg-rose-950/60 border border-rose-700/40" : "bg-amber-950/60 border border-amber-700/40"}`}>
+        <div className="text-xl">{isBull ? "🟢" : isBear ? "🔴" : "🟡"}</div>
+        <div className="flex-1 min-w-0">
+          <div className="font-bold text-sm">{sig} — {signal.symbol}</div>
+          <div className="text-[10px] text-[var(--bf-muted)]">
+            {rec?.type === "HOLD"
+              ? "No F&O action recommended"
+              : `${rec?.type?.replace("_", " ")} @ Strike ₹${rec?.strike?.toLocaleString() ?? "—"}`}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          <div className="text-[9px] text-[var(--bf-muted)]">Spot Price</div>
+          <div className="font-bold text-sm">₹{underlying.toFixed(2)}</div>
+        </div>
+      </div>
+
+      {/* ── QUICK SUMMARY: Entry / SL / Target / R:R ── */}
+      <div className="grid grid-cols-4 gap-2 text-center">
+        <div className="bg-emerald-950/30 border border-emerald-800/30 rounded-lg p-2">
+          <div className="text-[8px] text-[var(--bf-muted)] uppercase tracking-widest">Entry</div>
+          <div className="font-mono font-extrabold text-sm text-emerald-400">{eP ? INR(eP) : "—"}</div>
+        </div>
+        <div className="bg-rose-950/30 border border-rose-800/30 rounded-lg p-2">
+          <div className="text-[8px] text-[var(--bf-muted)] uppercase tracking-widest">Stop Loss</div>
+          <div className="font-mono font-extrabold text-sm text-rose-400">{sP ? INR(sP) : "—"}</div>
+        </div>
+        <div className="bg-sky-950/30 border border-sky-800/30 rounded-lg p-2">
+          <div className="text-[8px] text-[var(--bf-muted)] uppercase tracking-widest">Target</div>
+          <div className="font-mono font-extrabold text-sm text-sky-400">{tP ? INR(tP) : "—"}</div>
+        </div>
+        <div className="bg-amber-950/30 border border-amber-800/30 rounded-lg p-2">
+          <div className="text-[8px] text-[var(--bf-muted)] uppercase tracking-widest">Risk:Reward</div>
+          <div className="font-mono font-extrabold text-sm text-amber-400">
+            {eP && sP && tP ? `1:${(Math.abs(tP - eP) / Math.abs(eP - sP)).toFixed(1)}` : "—"}
+          </div>
+        </div>
+      </div>
+
+      {/* ── STRIKE PRICES TABLE ── */}
+      {list.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-[var(--bf-muted)] border-b border-white/8">
+                <th className="py-1.5 px-2 text-left">Strike Price</th>
+                <th className="py-1.5 px-2 text-center">Type</th>
+                <th className="py-1.5 px-2 text-right text-emerald-500">Buy At ₹</th>
+                <th className="py-1.5 px-2 text-right text-rose-500">Stop Loss ₹</th>
+                <th className="py-1.5 px-2 text-right text-sky-500">Target ₹</th>
+                <th className="py-1.5 px-2 text-center">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/3">
+              {list.map((strike: number) => {
+                const isAtm = strike === atm;
+                const isRec = rec?.strike === strike;
+                const otmCall = strike > atm;
+                const otmPut = strike < atm;
+                const diff = strike - atm;
+
+                let buy: number, sl: number, tgt: number, label: string;
+                if (isBull) {
+                  buy = eP + diff; sl = sP + diff; tgt = tP + diff;
+                  label = isRec ? "★ BUY CALL" : isAtm ? "BUY CALL (ATM)" : otmCall ? "BUY CALL (OTM)" : "BUY CALL (ITM)";
+                } else if (isBear) {
+                  buy = eP - diff; sl = sP - diff; tgt = tP - diff;
+                  label = isRec ? "★ BUY PUT" : isAtm ? "BUY PUT (ATM)" : otmPut ? "BUY PUT (OTM)" : "BUY PUT (ITM)";
+                } else {
+                  buy = eP; sl = sP; tgt = tP;
+                  label = sig === "EXIT" ? "EXIT" : "HOLD";
+                }
+
+                return (
+                  <tr key={strike} className={`${isRec ? "bg-emerald-900/25 ring-1 ring-inset ring-emerald-500/30" : ""} ${isAtm && !isRec ? "bg-white/4" : ""}`}>
+                    <td className="py-1.5 px-2 font-mono font-bold">
+                      ₹{strike.toLocaleString()}
+                      {isAtm && <span className="ml-1 text-[8px] px-1 py-0.5 bg-white/10 rounded">ATM</span>}
+                      {isRec && <span className="ml-1 text-[8px] px-1 py-0.5 bg-emerald-800 text-emerald-300 rounded">★ REC</span>}
+                    </td>
+                    <td className="py-1.5 px-2 text-center">
+                      {otmCall ? <span className="text-emerald-500">OTM</span> : otmPut ? <span className="text-rose-500">OTM</span> : <span className="text-white/50">ATM</span>}
+                    </td>
+                    <td className="py-1.5 px-2 text-right font-mono font-bold text-emerald-400">{buy > 0 ? `₹${buy.toFixed(2)}` : "—"}</td>
+                    <td className="py-1.5 px-2 text-right font-mono font-bold text-rose-400">{sl > 0 ? `₹${sl.toFixed(2)}` : "—"}</td>
+                    <td className="py-1.5 px-2 text-right font-mono font-bold text-sky-400">{tgt > 0 ? `₹${tgt.toFixed(2)}` : "—"}</td>
+                    <td className={`py-1.5 px-2 text-center font-bold ${isRec ? "text-emerald-300" : "text-[var(--bf-muted)]"}`}>
+                      {label}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────── Index Option Card (auto-visible) ─────────────────── */
+
+function IndexOptionCard({ opt }: { opt: { sym: string; label: string; signal: Signal | null; strikes: StrikesData | null; loading: boolean; error: string | null } }) {
+  const sig = opt.signal;
+  const st = opt.strikes;
+  const rec = st?.recommendation;
+  const strikeList = st?.strikes?.strikes ?? [];
+  const atm = st?.strikes?.atm ?? 0;
+  const tick = st?.strikes?.tick ?? 50;
+  const spotPrice = st?.strikes?.price ?? Number(sig?.entryPrice ?? 0);
+  const sigDir = String(sig?.signal ?? rec?.type ?? "HOLD").toUpperCase();
+  const isBull = sigDir === "BUY" || sigDir === "BUY_CALL" || rec?.type === "BUY_CALL";
+  const isBear = sigDir === "SELL" || sigDir === "BUY_PUT" || rec?.type === "BUY_PUT";
+  const isCall = isBull;
+  const strength = sig?.strength ?? 50;
+  const idxName = indexShortName(opt.label);
+  const recStrike = rec?.strike ?? (isBull ? atm + tick : isBear ? atm - tick : atm);
+
+  if (opt.loading) {
+    return (
+      <div className="rounded-xl border-2 border-white/20 bg-[#0a1628] p-5 animate-pulse">
+        <div className="h-5 w-40 bg-white/15 rounded mb-3" />
+        <div className="h-28 bg-white/8 rounded" />
+      </div>
+    );
+  }
+  if (opt.error) {
+    return (
+      <div className="rounded-xl border-2 border-red-500/60 bg-red-950/30 p-5">
+        <span className="text-red-400 text-base font-bold">{opt.label}: {opt.error}</span>
+      </div>
+    );
+  }
+
+  const mainCall = spotPrice > 0 && (isBull || isBear)
+    ? formatTradeCall(spotPrice, recStrike, isCall, idxName, strength)
+    : null;
+
+  return (
+    <div className={`rounded-xl border-2 p-3 sm:p-5 ${isBull ? "border-green-500/70 bg-gradient-to-r from-green-950/30 via-[#0a1628] to-[#0a1628]" : isBear ? "border-red-500/70 bg-gradient-to-r from-red-950/30 via-[#0a1628] to-[#0a1628]" : "border-yellow-500/50 bg-gradient-to-r from-yellow-950/20 via-[#0a1628] to-[#0a1628]"}`}>
+
+      {/* HEADER */}
+      <div className="flex items-center justify-between mb-3 sm:mb-4 flex-wrap gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <span className="text-xl sm:text-2xl">{isBull ? "🟢" : isBear ? "🔴" : "🟡"}</span>
+          <span className="font-extrabold text-base sm:text-xl text-white">{opt.label}</span>
+          <span className={`text-[10px] sm:text-xs px-2 sm:px-3 py-0.5 sm:py-1 rounded-full font-extrabold tracking-wide ${isBull ? "bg-green-500 text-black shadow-lg shadow-green-500/40" : isBear ? "bg-red-500 text-white shadow-lg shadow-red-500/40" : "bg-yellow-500 text-black shadow-lg shadow-yellow-500/40"}`}>
+            {isBull ? "BUY CALL" : isBear ? "BUY PUT" : "HOLD"}
+          </span>
+          {sig && <span className="text-[10px] sm:text-xs text-white/60">Str: {strength}%</span>}
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] sm:text-xs text-white/50 font-medium">SPOT</div>
+          <div className="font-mono font-extrabold text-sm sm:text-lg text-white">₹{spotPrice.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</div>
+        </div>
+      </div>
+
+      {/* MAIN TRADE CALL */}
+      {mainCall ? (
+        <div className={`rounded-xl p-3 sm:p-4 mb-3 sm:mb-4 border-2 font-mono shadow-xl ${isBull ? "border-green-400 bg-green-950/60 shadow-green-500/20" : "border-red-400 bg-red-950/60 shadow-red-500/20"}`}>
+          <div className={`font-extrabold text-sm sm:text-xl leading-tight ${isBull ? "text-green-300" : "text-red-300"}`}>
+            🚀 {mainCall.headline}
+          </div>
+          <div className="mt-2 space-y-0.5 sm:space-y-1 text-sm sm:text-base">
+            <div className="text-red-400 font-extrabold">🛑 {mainCall.slLine}</div>
+            <div className="text-cyan-300 font-extrabold">🎯 {mainCall.tgtLine}</div>
+            <div className="text-yellow-300 font-extrabold">📦 {mainCall.lotLine}</div>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-xl p-3 sm:p-4 mb-3 sm:mb-4 border-2 border-yellow-500/50 bg-yellow-950/30 font-mono">
+          <div className="text-yellow-300 font-extrabold text-sm sm:text-lg">⏸ HOLD — No active trade for {idxName}</div>
+          <div className="text-white/50 text-xs sm:text-sm mt-1">Waiting for a clear BUY/SELL signal from technical analysis…</div>
+        </div>
+      )}
+
+      {/* STRIKE-WISE BREAKDOWN */}
+      {strikeList.length > 0 && spotPrice > 0 && (isBull || isBear) && (
+        <div className="overflow-x-auto rounded-lg border border-white/10 -mx-1 sm:mx-0">
+          <table className="w-full text-[10px] sm:text-sm min-w-[500px]">
+            <thead>
+              <tr className="bg-white/5 text-white/80 border-b border-white/10">
+                <th className="py-1.5 sm:py-2 px-2 sm:px-3 text-left font-bold">Strike ₹</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-center font-bold">Type</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-green-400">Premium</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-green-400">Buy At</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-red-400">SL</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-cyan-400">T1</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-cyan-300">T2</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-bold text-cyan-200">T3+</th>
+                <th className="py-1.5 sm:py-2 px-1 sm:px-3 text-center font-bold text-yellow-400">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {strikeList.map((strike: number) => {
+                const isAtmS = strike === atm;
+                const isRecS = strike === recStrike;
+                const otmCall = strike > atm;
+                const otmPut = strike < atm;
+                const premium = estimatePremium(spotPrice, strike, isCall);
+                const opts = estimateOptionSLTarget(premium, strength);
+                const lo = Math.floor(premium / 5) * 5 || Math.floor(premium);
+                const hi = lo + 5;
+                const label = isCall
+                  ? (isRecS ? "★ BUY CE" : isAtmS ? "CE (ATM)" : otmCall ? "CE (OTM)" : "CE (ITM)")
+                  : (isRecS ? "★ BUY PE" : isAtmS ? "PE (ATM)" : otmPut ? "PE (OTM)" : "PE (ITM)");
+
+                return (
+                  <tr key={strike} className={`${isRecS ? "bg-green-900/40 ring-1 ring-inset ring-green-400/50" : ""} ${isAtmS && !isRecS ? "bg-white/5" : ""} hover:bg-white/8 transition-colors`}>
+                    <td className="py-1.5 sm:py-2 px-2 sm:px-3 font-mono font-extrabold text-white">
+                      ₹{strike.toLocaleString()}
+                      {isAtmS && <span className="ml-1 sm:ml-1.5 text-[8px] sm:text-[9px] px-1 sm:px-1.5 py-0.5 bg-white/20 rounded text-white font-bold">ATM</span>}
+                      {isRecS && <span className="ml-1 sm:ml-1.5 text-[8px] sm:text-[9px] px-1 sm:px-1.5 py-0.5 bg-green-500 text-black rounded font-bold">★ REC</span>}
+                    </td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-center font-bold">
+                      {isCall
+                        ? (otmCall ? <span className="text-green-400">OTM</span> : otmPut ? <span className="text-orange-400">ITM</span> : <span className="text-white">ATM</span>)
+                        : (otmPut ? <span className="text-red-400">OTM</span> : otmCall ? <span className="text-orange-400">ITM</span> : <span className="text-white">ATM</span>)}
+                    </td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-white">₹{premium.toFixed(1)}</td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-green-400">{lo}-{hi}</td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-red-400">{opts.sl}</td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-cyan-400">{opts.t1}</td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-cyan-300">{opts.t2}</td>
+                    <td className="py-1.5 sm:py-2 px-1 sm:px-3 text-right font-mono font-extrabold text-cyan-200">{opts.t3}+</td>
+                    <td className={`py-1.5 sm:py-2 px-1 sm:px-3 text-center text-[10px] sm:text-xs font-extrabold ${isRecS ? "text-green-300" : "text-white/60"}`}>
+                      {label}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Reason */}
+      {rec?.reason && <div className="mt-3 text-sm text-white/60 italic">💡 {rec.reason}</div>}
+      {sig?.reason && <div className="mt-1 text-xs text-white/40">📊 {sig.reason}</div>}
     </div>
   );
 }
