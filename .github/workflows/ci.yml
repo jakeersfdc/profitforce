@@ -70,10 +70,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build web image
-        run: docker build -f Dockerfile.web -t ProfitForce-web:${{ github.sha }} .
+        run: docker build -f Dockerfile.web -t profitforce-web:${{ github.sha }} .
 
       - name: Build ML image
-        run: docker build -f Dockerfile.ml -t ProfitForce-ml:${{ github.sha }} .
+        run: docker build -f Dockerfile.ml -t profitforce-ml:${{ github.sha }} .
 
   # ────────────────────────────────────────────────────────────
   deploy:
@@ -100,12 +100,12 @@ jobs:
 
       - name: Build and Push Web
         run: |
-          docker build -f Dockerfile.web -t gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-web:${{ github.sha }} .
-          docker push gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-web:${{ github.sha }}
+          docker build -f Dockerfile.web -t gcr.io/${{ secrets.GCLOUD_PROJECT }}/profitforce-web:${{ github.sha }} .
+          docker push gcr.io/${{ secrets.GCLOUD_PROJECT }}/profitforce-web:${{ github.sha }}
 
       - name: Build and Push ML
         run: |
-          docker build -f Dockerfile.ml -t gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-ml:${{ github.sha }} .
+          docker build -f Dockerfile.ml -t gcr.io/${{ secrets.GCLOUD_PROJECT }}/profitforce-ml:${{ github.sha }} .
           docker push gcr.io/${{ secrets.GCLOUD_PROJECT }}/ProfitForce-ml:${{ github.sha }}
 
       - name: Deploy to GKE

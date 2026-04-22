@@ -1637,39 +1637,89 @@ function MyPositions({ trades, onExit, onRemove, onChartClick }: {
 
 function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities: IndexData[]; usdInr: number; onBuyTrade?: (t: Omit<TrackedTrade, "id" | "boughtAt" | "status">) => void }) {
   const withData = commodities.filter(c => c.price != null && c.change != null);
+
+  // Fetch REAL technical-analysis signals from SignalEngine for every
+  // commodity symbol, the same engine that produces stock & index calls
+  // (EMA alignment, RSI, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV,
+  // Pivot/Fib S&R, candle patterns, and the trend-aware counter-trend veto).
+  // This replaces the previous heuristic that just thresholded today's %
+  // change, which was producing "not exact" predictions.
+  const [cmdSignals, setCmdSignals] = useState<Record<string, Signal | null>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const results = await Promise.all(
+        withData.map(async c => {
+          try {
+            const r = await fetch(`/api/signal?symbol=${encodeURIComponent(c.sym)}`);
+            if (!r.ok) return [c.id, null] as const;
+            const j = await r.json();
+            return [c.id, (j?.signal ?? null) as Signal | null] as const;
+          } catch {
+            return [c.id, null] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      const next: Record<string, Signal | null> = {};
+      for (const [id, sig] of results) next[id] = sig;
+      setCmdSignals(next);
+    };
+    load();
+    // Refresh every 60s so commodity calls track intraday technical shifts.
+    const t = setInterval(load, 60_000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [withData.map(c => c.sym).join(",")]);
+
   if (withData.length === 0) return null;
 
   const predictions = withData.map(c => {
     const price = c.price ?? 0;
     const change = c.change ?? 0;
-    // Volatility heuristic per commodity (approx daily ranges)
+    // Per-commodity daily volatility (fallback when ATR unavailable)
     const volPct = c.id === "NATGAS" ? 0.025 : c.id === "SILVER" ? 0.018 : c.id === "CRUDE" || c.id === "BRENT" ? 0.015 : c.id === "COPPER" ? 0.012 : c.id === "GOLD" ? 0.008 : 0.012;
-    let signal: "BUY" | "SELL" | "HOLD" = "HOLD";
-    if (change >= 0.4) signal = "BUY";
-    else if (change <= -0.4) signal = "SELL";
 
-    const strength = Math.min(95, Math.max(35, Math.round(50 + Math.abs(change) * 12)));
+    // Real signal from SignalEngine. Falls back to "HOLD" while the fetch
+    // is in-flight (rather than the old noisy +0.4% threshold).
+    const sig = cmdSignals[c.id];
+    const sigDir = String(sig?.signal ?? "HOLD").toUpperCase();
+    const signal: "BUY" | "SELL" | "HOLD" =
+      sigDir === "BUY" ? "BUY" : sigDir === "SELL" ? "SELL" : "HOLD";
+
+    // Use engine-provided strength/entry/SL/target where available.
+    const strength = Number.isFinite(sig?.strength)
+      ? (sig!.strength as number)
+      : Math.min(95, Math.max(35, Math.round(50 + Math.abs(change) * 12)));
+    const engineEntry = Number(sig?.entryPrice ?? 0);
+    const engineSL = Number(sig?.stopLoss ?? 0);
+    const engineTgt = Number(sig?.targetPrice ?? 0);
 
     let entry = price, sl = 0, t1 = 0, t2 = 0, t3 = 0;
     if (signal === "BUY") {
-      entry = price;
-      sl = price * (1 - volPct);
-      t1 = price * (1 + volPct * 1.0);
-      t2 = price * (1 + volPct * 1.8);
-      t3 = price * (1 + volPct * 2.8);
+      entry = engineEntry > 0 ? engineEntry : price;
+      // Use engine's ATR-based stop if it sits inside the volatility envelope.
+      sl = engineSL > 0 && engineSL < entry ? engineSL : entry * (1 - volPct);
+      const riskPct = entry > 0 ? (entry - sl) / entry : volPct;
+      // Staggered targets scaled off actual risk (1R / 1.8R / 2.8R).
+      t1 = engineTgt > 0 ? engineTgt : entry * (1 + riskPct * 1.0);
+      t2 = entry * (1 + Math.max(riskPct * 1.8, volPct * 1.8));
+      t3 = entry * (1 + Math.max(riskPct * 2.8, volPct * 2.8));
     } else if (signal === "SELL") {
-      entry = price;
-      sl = price * (1 + volPct);
-      t1 = price * (1 - volPct * 1.0);
-      t2 = price * (1 - volPct * 1.8);
-      t3 = price * (1 - volPct * 2.8);
+      entry = engineEntry > 0 ? engineEntry : price;
+      sl = engineSL > 0 && engineSL > entry ? engineSL : entry * (1 + volPct);
+      const riskPct = entry > 0 ? (sl - entry) / entry : volPct;
+      t1 = engineTgt > 0 ? engineTgt : entry * (1 - riskPct * 1.0);
+      t2 = entry * (1 - Math.max(riskPct * 1.8, volPct * 1.8));
+      t3 = entry * (1 - Math.max(riskPct * 2.8, volPct * 2.8));
     } else {
       sl = price * (1 - volPct * 0.8);
       t1 = price * (1 + volPct * 0.8);
       t2 = price * (1 + volPct * 1.5);
       t3 = price * (1 + volPct * 2.2);
     }
-    return { ...c, signal, strength, entry, sl, t1, t2, t3, volPct };
+    const reason = sig?.reason ?? "";
+    return { ...c, signal, strength, entry, sl, t1, t2, t3, volPct, reason };
   });
 
   const fmt = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -1746,6 +1796,11 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
                 </div>
                 {p.signal !== "HOLD" && (
                   <div className="text-[10px] text-white/60 mt-0.5">Est. premium ≈ ₹{fmt(estPremium)} • Lot size varies (check broker)</div>
+                )}
+                {p.reason && (
+                  <div className="text-[10px] text-white/50 mt-1 leading-snug" title={p.reason}>
+                    <span className="text-white/40">TA:</span> {p.reason.length > 140 ? p.reason.slice(0, 140) + "…" : p.reason}
+                  </div>
                 )}
               </div>
 
