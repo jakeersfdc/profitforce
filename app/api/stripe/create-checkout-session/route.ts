@@ -8,7 +8,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'stripe not configured' }, { status: 500 });
   }
   const body = await req.json();
-  const { clerk_id, priceId, success_url, cancel_url, email } = body;
+  const { clerk_id, priceId, success_url, cancel_url, email, plan } = body;
   if (!clerk_id || !priceId) return NextResponse.json({ error: 'missing clerk_id or priceId' }, { status: 400 });
 
   try {
@@ -29,8 +29,10 @@ export async function POST(req: Request) {
       payment_method_types: ['card'],
       customer: customer.id,
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: success_url || `${process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000'}/?session=success`,
-      cancel_url: cancel_url || `${process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000'}/?session=cancel`,
+      metadata: { clerk_id, plan: plan || 'pro' },
+      subscription_data: { metadata: { clerk_id, plan: plan || 'pro' } },
+      success_url: success_url || `${process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000'}/dashboard?subscription=success`,
+      cancel_url: cancel_url || `${process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000'}/pricing?subscription=cancelled`,
     });
 
     // persist stripe customer.id into users table metadata for clerk_id

@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f8fafc;
-  --foreground: #171717;
+  --background: #040915;
+  --foreground: #e6eef8;
   --bf-bg-dark: #040915; /* near-black */
   --bf-bg-deep: #021426; /* deep navy */
   --bf-accent: #0ea5a4; /* teal accent */
@@ -14,13 +14,6 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: var(--bf-bg-dark);
-    --foreground: #e6eef8;
-  }
 }
 
 body {

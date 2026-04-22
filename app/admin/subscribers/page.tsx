@@ -1,11 +1,11 @@
 'use client'
 import React, { useEffect, useState } from 'react';
-import { SignInButton, useUser } from '@clerk/nextjs';
+import { useAuth, SafeSignInButton } from '@/components/AuthProvider';
 
 type UserRow = { id: number; clerk_id: string; email?: string; is_subscriber: boolean; created_at?: string };
 
 export default function AdminSubscribersPage() {
-  const { isLoaded, user } = useUser();
+  const { isLoaded, user } = useAuth();
   const [rows, setRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,12 +46,12 @@ export default function AdminSubscribersPage() {
       {!isLoaded ? <div>Loading…</div> : !user ? (
         <div>
           <p>You must sign in as an admin user to manage subscribers.</p>
-          <SignInButton />
+          <SafeSignInButton mode="modal"><button className="mt-2 px-4 py-2 bg-blue-600 text-white rounded">Sign In</button></SafeSignInButton>
         </div>
       ) : (
         <div>
         <div style={{ marginBottom: 12 }}>
-          <strong>Signed in as:</strong> {user?.primaryEmailAddress?.emailAddress || user?.id}
+          <strong>Signed in as:</strong> {user?.firstName || 'Admin'}
         </div>
 
         {loading && <div>Loading…</div>}

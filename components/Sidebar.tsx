@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
-import { Home, Zap, Star, User, Menu, X } from "lucide-react";
+import { Home, Zap, Star, User, Menu, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { usePathname } from "next/navigation";
 
 const navItems = [
@@ -13,8 +13,16 @@ const navItems = [
 ];
 
 export default function Sidebar() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false); // mobile drawer
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("pf_sidebar_collapsed") === "1";
+  });
   const pathname = usePathname() || "/";
+
+  useEffect(() => {
+    if (typeof window !== "undefined") localStorage.setItem("pf_sidebar_collapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
 
   return (
     <>
@@ -33,12 +41,22 @@ export default function Sidebar() {
       </div>
 
       {/* Desktop sidebar */}
-      <aside className="hidden md:flex flex-col w-72 p-4 bf-sidebar bf-shadow">
-        <div className="px-2 py-4 flex items-center gap-3">
-          <div className="text-2xl font-bold">ProfitForce</div>
+      <aside
+        className={`hidden md:flex flex-col p-3 bf-sidebar bf-shadow transition-all duration-200 ${collapsed ? "w-16" : "w-72"}`}
+      >
+        <div className={`py-3 flex items-center ${collapsed ? "justify-center" : "justify-between"}`}>
+          {!collapsed && <div className="text-xl font-bold px-2">ProfitForce</div>}
+          <button
+            onClick={() => setCollapsed((s) => !s)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand" : "Collapse"}
+            className="p-1.5 rounded-md text-white/60 hover:bg-white/10"
+          >
+            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          </button>
         </div>
 
-        <nav className="mt-6 flex-1">
+        <nav className="mt-4 flex-1">
           <ul className="space-y-1">
             {navItems.map((item) => {
               const Icon = item.icon;
@@ -47,12 +65,11 @@ export default function Sidebar() {
                 <li key={item.href}>
                   <Link
                     href={item.href}
-                    className={`nav-item flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
-                      active ? "bf-active" : ""
-                    }`}
+                    title={collapsed ? item.name : undefined}
+                    className={`nav-item flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${active ? "bf-active" : ""} ${collapsed ? "justify-center" : ""}`}
                   >
                     <Icon size={18} />
-                    <span className="text-sm font-medium">{item.name}</span>
+                    {!collapsed && <span className="text-sm font-medium">{item.name}</span>}
                   </Link>
                 </li>
               );
@@ -60,10 +77,14 @@ export default function Sidebar() {
           </ul>
         </nav>
 
-        <div className="mt-auto px-3 py-4">
-          <Link href="/profile" className="flex items-center gap-3 px-2 py-2 rounded-md hover:bg-white/3">
+        <div className="mt-auto px-1 py-3">
+          <Link
+            href="/profile"
+            title={collapsed ? "Your Account" : undefined}
+            className={`flex items-center gap-3 px-2 py-2 rounded-md hover:bg-white/5 ${collapsed ? "justify-center" : ""}`}
+          >
             <User size={18} />
-            <div className="text-sm">Your Account</div>
+            {!collapsed && <div className="text-sm">Your Account</div>}
           </Link>
         </div>
       </aside>

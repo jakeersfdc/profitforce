@@ -47,6 +47,22 @@ export async function POST(req: Request) {
             `INSERT INTO users (clerk_id, email, is_subscriber, metadata) VALUES ($1,$2,TRUE, jsonb_build_object('stripe_customer',$3)) ON CONFLICT (clerk_id) DO UPDATE SET is_subscriber = TRUE, email = COALESCE(EXCLUDED.email, users.email), metadata = jsonb_set(COALESCE(users.metadata, '{}'::jsonb), '{stripe_customer}', to_jsonb($3::text), true)`
             , [clerkId, session.customer_details?.email || null, customerId]
           );
+
+          // Store/update subscription record with plan info
+          const subscriptionId = session.subscription as string | undefined;
+          let plan = 'pro'; // default
+          if (subscriptionId) {
+            try {
+              const sub = await stripe.subscriptions.retrieve(subscriptionId);
+              plan = (sub.metadata as any)?.plan || 'pro';
+            } catch {}
+          }
+          if (subscriptionId) {
+            await client.query(
+              `INSERT INTO subscriptions (clerk_id, stripe_customer_id, stripe_subscription_id, plan, status, expires_at) VALUES ($1, $2, $3, $4, 'active', NOW() + INTERVAL '30 days') ON CONFLICT (clerk_id) DO UPDATE SET stripe_customer_id = $2, stripe_subscription_id = $3, plan = $4, status = 'active', expires_at = NOW() + INTERVAL '30 days', updated_at = NOW()`,
+              [clerkId, customerId, subscriptionId, plan]
+            );
+          }
         } finally {
           await client.end();
         }
@@ -70,6 +86,10 @@ export async function POST(req: Request) {
           await client.connect();
           try {
             await client.query('UPDATE users SET is_subscriber = FALSE WHERE clerk_id = $1', [clerkId]);
+            await client.query(
+              `UPDATE subscriptions SET status = $2, updated_at = NOW() WHERE clerk_id = $1`,
+              [clerkId, typ === 'customer.subscription.deleted' ? 'cancelled' : 'payment_failed']
+            );
           } finally {
             await client.end();
           }

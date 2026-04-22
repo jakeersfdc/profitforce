@@ -171,6 +171,116 @@ function vwap(highs: number[], lows: number[], closes: number[], volumes: number
 
 // ── Signal types ──────────────────────────────────────────────────────────────
 
+// ── Support & Resistance helpers ──────────────────────────────────────────────
+
+/** Classic Pivot Points (Standard/Floor) from previous day OHLC */
+function pivotPoints(high: number, low: number, close: number) {
+  const pp = (high + low + close) / 3;
+  const r1 = 2 * pp - low;
+  const s1 = 2 * pp - high;
+  const r2 = pp + (high - low);
+  const s2 = pp - (high - low);
+  const r3 = high + 2 * (pp - low);
+  const s3 = low - 2 * (high - pp);
+  return { pp, r1, r2, r3, s1, s2, s3 };
+}
+
+/** Fibonacci retracement levels from a swing range */
+function fibLevels(swingHigh: number, swingLow: number) {
+  const range = swingHigh - swingLow;
+  return {
+    fib236: swingHigh - range * 0.236,
+    fib382: swingHigh - range * 0.382,
+    fib500: swingHigh - range * 0.500,
+    fib618: swingHigh - range * 0.618,
+    fib786: swingHigh - range * 0.786,
+  };
+}
+
+/** Detect swing highs and lows (local peaks/troughs using left/right window) */
+function swingHighsLows(highs: number[], lows: number[], window = 5) {
+  const swingHighs: { index: number; price: number }[] = [];
+  const swingLows: { index: number; price: number }[] = [];
+
+  for (let i = window; i < highs.length - window; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let j = 1; j <= window; j++) {
+      if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) isHigh = false;
+      if (lows[i] >= lows[i - j] || lows[i] >= lows[i + j]) isLow = false;
+    }
+    if (isHigh) swingHighs.push({ index: i, price: highs[i] });
+    if (isLow) swingLows.push({ index: i, price: lows[i] });
+  }
+
+  return { swingHighs, swingLows };
+}
+
+/** Find nearest support and resistance levels from swing points */
+function findSupportResistance(
+  price: number,
+  highs: number[],
+  lows: number[],
+  closes: number[],
+) {
+  const n = closes.length;
+  const prevHigh = highs[n - 2];
+  const prevLow = lows[n - 2];
+  const prevClose = closes[n - 2];
+
+  // 1. Pivot points from previous bar
+  const pivots = pivotPoints(prevHigh, prevLow, prevClose);
+
+  // 2. Swing highs/lows (use last 60 bars with a 3-bar window for more frequent pivots)
+  const lookback = Math.min(n, 60);
+  const hSlice = highs.slice(-lookback);
+  const lSlice = lows.slice(-lookback);
+  const { swingHighs, swingLows } = swingHighsLows(hSlice, lSlice, 3);
+
+  // 3. Fibonacci levels from 20-day swing range
+  const recentHigh = Math.max(...highs.slice(-20));
+  const recentLow = Math.min(...lows.slice(-20));
+  const fibs = fibLevels(recentHigh, recentLow);
+
+  // Collect all resistance levels above current price
+  const rawResistance = [
+    pivots.r1, pivots.r2, pivots.r3,
+    fibs.fib236, fibs.fib382,
+    ...swingHighs.map(s => s.price),
+  ].filter(l => l > price * 1.001); // at least 0.1% above price
+
+  // Collect all support levels below current price
+  const rawSupport = [
+    pivots.s1, pivots.s2, pivots.s3,
+    fibs.fib618, fibs.fib786,
+    ...swingLows.map(s => s.price),
+  ].filter(l => l < price * 0.999); // at least 0.1% below price
+
+  // Sort and deduplicate (merge levels within 0.3% of each other)
+  const dedup = (levels: number[], ascending: boolean): number[] => {
+    const sorted = [...levels].sort((a, b) => ascending ? a - b : b - a);
+    const result: number[] = [];
+    for (const l of sorted) {
+      if (result.length === 0 || Math.abs(l - result[result.length - 1]) / price > 0.003) {
+        result.push(l);
+      }
+    }
+    return result;
+  };
+
+  const resistanceLevels = dedup(rawResistance, true).slice(0, 3);   // nearest 3 resistance
+  const supportLevels = dedup(rawSupport, false).slice(0, 3);        // nearest 3 support
+
+  return {
+    pivots,
+    fibs,
+    resistanceLevels,
+    supportLevels,
+    swingHigh: recentHigh,
+    swingLow: recentLow,
+  };
+}
+
 export interface Signal {
   symbol: string;
   signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD';
@@ -252,16 +362,76 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const obvArr = obv(closes, volumes);
   const obvSlope = obvArr[n - 1] - obvArr[Math.max(0, n - 6)];
 
+  // ── Support & Resistance levels ───────────────────────────────────────────
+  const sr = findSupportResistance(lastClose, highs, lows, closes);
+  const { pivots, fibs, resistanceLevels, supportLevels } = sr;
+  const nearestResistance = resistanceLevels[0] ?? null;
+  const nearestSupport = supportLevels[0] ?? null;
+
+  // ── Primary trend context (expert-trader filter) ──────────────────────────
+  // A professional technician never buys oversold in a confirmed downtrend
+  // and never shorts overbought in a confirmed uptrend. We detect the primary
+  // trend from EMA alignment + slope, and use it to veto counter-trend
+  // mean-reversion signals ("don't catch a falling knife").
+  const emaBull = ema9[n - 1] > ema21[n - 1] && ema21[n - 1] > ema50[n - 1];
+  const emaBear = ema9[n - 1] < ema21[n - 1] && ema21[n - 1] < ema50[n - 1];
+  const ema50Slope = ema50[n - 1] - ema50[Math.max(0, n - 6)];
+  const ema200Slope = ema200[n - 1] - ema200[Math.max(0, n - 11)];
+  const longTermBull = lastClose > ema200[n - 1] && ema200Slope >= 0;
+  const longTermBear = lastClose < ema200[n - 1] && ema200Slope <= 0;
+  const strongUptrend = emaBull && ema50Slope > 0 && longTermBull;
+  const strongDowntrend = emaBear && ema50Slope < 0 && longTermBear;
+
+  // Today's candle (price-action) — sharp closes shouldn't be ignored
+  const dayChangePct = prevClose > 0 ? (lastClose - prevClose) / prevClose : 0;
+  const isSharpDownDay = dayChangePct <= -0.012;  // -1.2%+ is a decisive bear close
+  const isSharpUpDay = dayChangePct >= 0.012;
+  const isModerateDownDay = dayChangePct <= -0.005;
+  const isModerateUpDay = dayChangePct >= 0.005;
+
   // ── Confluence scoring ────────────────────────────────────────────────────
   let bullScore = 0;
   let bearScore = 0;
   const reasons: string[] = [];
 
-  // 1. RSI
-  if (rsiVal < 30) { bullScore += 2; reasons.push(`RSI oversold (${rsiVal.toFixed(1)})`); }
-  else if (rsiVal < 40) { bullScore += 1; reasons.push(`RSI low (${rsiVal.toFixed(1)})`); }
-  else if (rsiVal > 70) { bearScore += 2; reasons.push(`RSI overbought (${rsiVal.toFixed(1)})`); }
-  else if (rsiVal > 60) { bearScore += 1; reasons.push(`RSI high (${rsiVal.toFixed(1)})`); }
+  // 1. RSI — oversold is only a BUY trigger when trend is not actively breaking down.
+  //    In a strong downtrend oversold RSI can persist for weeks (falling knife).
+  if (rsiVal < 30) {
+    if (strongDowntrend || isSharpDownDay) {
+      // Oversold within a bear trend / on a red day → no bull credit, actually bearish continuation
+      bearScore += 1;
+      reasons.push(`RSI oversold in downtrend (${rsiVal.toFixed(1)}) — continuation risk`);
+    } else {
+      bullScore += 2;
+      reasons.push(`RSI oversold (${rsiVal.toFixed(1)})`);
+    }
+  }
+  else if (rsiVal < 40) {
+    if (strongDowntrend) {
+      // Weak RSI in downtrend is not a bull signal
+      reasons.push(`RSI low (${rsiVal.toFixed(1)}) in downtrend`);
+    } else {
+      bullScore += 1;
+      reasons.push(`RSI low (${rsiVal.toFixed(1)})`);
+    }
+  }
+  else if (rsiVal > 70) {
+    if (strongUptrend || isSharpUpDay) {
+      bullScore += 1;
+      reasons.push(`RSI overbought in uptrend (${rsiVal.toFixed(1)}) — momentum`);
+    } else {
+      bearScore += 2;
+      reasons.push(`RSI overbought (${rsiVal.toFixed(1)})`);
+    }
+  }
+  else if (rsiVal > 60) {
+    if (strongUptrend) {
+      reasons.push(`RSI high (${rsiVal.toFixed(1)}) in uptrend`);
+    } else {
+      bearScore += 1;
+      reasons.push(`RSI high (${rsiVal.toFixed(1)})`);
+    }
+  }
 
   // 2. MACD
   if (macdHist > 0 && macdHistPrev <= 0) { bullScore += 2; reasons.push('MACD bullish cross'); }
@@ -269,9 +439,25 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (macdHist < 0 && macdHistPrev >= 0) { bearScore += 2; reasons.push('MACD bearish cross'); }
   else if (macdHist < 0) { bearScore += 1; reasons.push('MACD negative'); }
 
-  // 3. Bollinger Bands
-  if (bbLower && lastClose <= bbLower) { bullScore += 2; reasons.push('Price at lower BB'); }
-  if (bbUpper && lastClose >= bbUpper) { bearScore += 2; reasons.push('Price at upper BB'); }
+  // 3. Bollinger Bands — lower-band touch is only bullish if trend isn't breaking down
+  if (bbLower && lastClose <= bbLower) {
+    if (strongDowntrend || isSharpDownDay) {
+      bearScore += 1;
+      reasons.push('Price breaking lower BB in downtrend');
+    } else {
+      bullScore += 2;
+      reasons.push('Price at lower BB');
+    }
+  }
+  if (bbUpper && lastClose >= bbUpper) {
+    if (strongUptrend || isSharpUpDay) {
+      bullScore += 1;
+      reasons.push('Price breaking upper BB in uptrend');
+    } else {
+      bearScore += 2;
+      reasons.push('Price at upper BB');
+    }
+  }
 
   // 4. EMA alignment
   if (ema9[n - 1] > ema21[n - 1] && ema21[n - 1] > ema50[n - 1]) { bullScore += 2; reasons.push('EMA 9>21>50 aligned'); }
@@ -306,20 +492,134 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     else { bearScore += 1; reasons.push(`High volume down (${volRatio.toFixed(1)}x)`); }
   }
 
+  // 10. Support & Resistance proximity scoring
+  //     Only treat support as bullish if it's holding (not in an active breakdown).
+  if (nearestSupport) {
+    const distToSupport = (lastClose - nearestSupport) / lastClose;
+    const breakingSupport = strongDowntrend || isSharpDownDay;
+    if (distToSupport >= 0 && distToSupport < 0.01) {
+      if (breakingSupport) {
+        bearScore += 2;
+        reasons.push(`Testing support ₹${round(nearestSupport)} in weak market — breakdown risk`);
+      } else {
+        bullScore += 2;
+        reasons.push(`At support ₹${round(nearestSupport)}`);
+      }
+    } else if (distToSupport >= 0 && distToSupport < 0.02) {
+      if (breakingSupport) {
+        bearScore += 1;
+        reasons.push(`Near support ₹${round(nearestSupport)} under pressure`);
+      } else {
+        bullScore += 1;
+        reasons.push(`Near support ₹${round(nearestSupport)}`);
+      }
+    }
+  }
+  if (nearestResistance) {
+    const distToResistance = (nearestResistance - lastClose) / lastClose;
+    const breakingResistance = strongUptrend || isSharpUpDay;
+    if (distToResistance >= 0 && distToResistance < 0.01) {
+      if (breakingResistance) {
+        bullScore += 2;
+        reasons.push(`Breaking resistance ₹${round(nearestResistance)}`);
+      } else {
+        bearScore += 2;
+        reasons.push(`At resistance ₹${round(nearestResistance)}`);
+      }
+    } else if (distToResistance >= 0 && distToResistance < 0.02) {
+      if (breakingResistance) {
+        bullScore += 1;
+        reasons.push(`Approaching resistance ₹${round(nearestResistance)} with momentum`);
+      } else {
+        bearScore += 1;
+        reasons.push(`Near resistance ₹${round(nearestResistance)}`);
+      }
+    }
+  }
+
+  // 12. Today's price-action — a decisive daily close is the single most
+  //     important short-term signal a technician reads. Ignoring it is how
+  //     systems end up "bullish" on a day the market fell hard.
+  if (isSharpDownDay) {
+    bearScore += 3;
+    reasons.push(`Sharp bear close (${(dayChangePct * 100).toFixed(2)}%)`);
+  } else if (isModerateDownDay) {
+    bearScore += 1;
+    reasons.push(`Bear close (${(dayChangePct * 100).toFixed(2)}%)`);
+  }
+  if (isSharpUpDay) {
+    bullScore += 3;
+    reasons.push(`Sharp bull close (+${(dayChangePct * 100).toFixed(2)}%)`);
+  } else if (isModerateUpDay) {
+    bullScore += 1;
+    reasons.push(`Bull close (+${(dayChangePct * 100).toFixed(2)}%)`);
+  }
+
+  // 13. Candlestick reversal patterns (bullish/bearish engulfing on last bar)
+  if (n >= 2) {
+    const prevOpen = Number(hist[n - 2].open ?? prevClose);
+    const lastOpen = Number(hist[n - 1].open ?? lastClose);
+    const prevBearish = prevClose < prevOpen;
+    const prevBullish = prevClose > prevOpen;
+    const lastBullishCandle = lastClose > lastOpen;
+    const lastBearishCandle = lastClose < lastOpen;
+    // Bullish engulfing: previous red, current green engulfs previous body
+    if (prevBearish && lastBullishCandle && lastOpen <= prevClose && lastClose >= prevOpen) {
+      bullScore += 2;
+      reasons.push('Bullish engulfing');
+    }
+    // Bearish engulfing
+    if (prevBullish && lastBearishCandle && lastOpen >= prevClose && lastClose <= prevOpen) {
+      bearScore += 2;
+      reasons.push('Bearish engulfing');
+    }
+  }
+
+  // 11. Pivot point position
+  if (lastClose > pivots.pp) {
+    bullScore += 1;
+    reasons.push(`Above pivot (₹${round(pivots.pp)})`);
+  } else {
+    bearScore += 1;
+    reasons.push(`Below pivot (₹${round(pivots.pp)})`);
+  }
+
   // ── Determine signal ──────────────────────────────────────────────────────
   const netScore = bullScore - bearScore;
   const totalVotes = bullScore + bearScore;
-  const minConfluence = 1; // lowered: any directional bias triggers a signal
+  const minConfluence = 3; // require 3+ indicator agreement for actionable signal
 
   let signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD' = 'HOLD';
   if (netScore >= minConfluence) signal = 'BUY';
   else if (netScore <= -minConfluence) signal = 'SELL';
 
+  // ── Counter-trend veto (expert-trader discipline) ─────────────────────────
+  // A BUY on a sharp bear day in a confirmed downtrend with strong ADX is
+  // almost always a trap. Downgrade to HOLD instead of issuing a bad signal.
+  const strongTrend = adxVal > 25;
+  if (signal === 'BUY' && strongDowntrend && strongTrend && isSharpDownDay) {
+    signal = 'HOLD';
+    reasons.push('VETO: counter-trend BUY on sharp bear day in confirmed downtrend');
+  }
+  if (signal === 'SELL' && strongUptrend && strongTrend && isSharpUpDay) {
+    signal = 'HOLD';
+    reasons.push('VETO: counter-trend SELL on sharp bull day in confirmed uptrend');
+  }
+  // Weaker guard: any BUY on a sharp bear day needs overwhelming confluence
+  if (signal === 'BUY' && isSharpDownDay && netScore < minConfluence + 2) {
+    signal = 'HOLD';
+    reasons.push('VETO: insufficient confluence for BUY on sharp bear day');
+  }
+  if (signal === 'SELL' && isSharpUpDay && netScore > -(minConfluence + 2)) {
+    signal = 'HOLD';
+    reasons.push('VETO: insufficient confluence for SELL on sharp bull day');
+  }
+
   // EXIT signal: counter-trend trigger when in position context
   if (signal === 'BUY' && rsiVal > 75 && macdHist < macdHistPrev) signal = 'EXIT';
   if (signal === 'SELL' && rsiVal < 25 && macdHist > macdHistPrev) signal = 'EXIT';
 
-  // ── Compute entry / stop / target using ATR ────────────────────────────────
+  // ── Compute entry / stop / target using ATR + S/R levels ───────────────────
   // Use live quote price instead of last historical close for accurate entry
   const liveQuote = await fetchQuote(symbol);
   const entryPrice = liveQuote.price > 0 ? liveQuote.price : lastClose;
@@ -333,12 +633,41 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     const atrMultTrail = 2.0;
 
     if (signal === 'BUY') {
-      stopLoss = round(entryPrice - atrMultStop * atrVal);
-      targetPrice = round(entryPrice + atrMultTarget * atrVal);
+      // Stop loss: use nearest support or ATR-based, whichever is tighter but not too close
+      const atrStop = entryPrice - atrMultStop * atrVal;
+      if (nearestSupport && nearestSupport < entryPrice) {
+        // Place stop just below support (with ATR buffer)
+        const srStop = nearestSupport - atrVal * 0.3;
+        // Use the higher of the two (tighter stop) but not above entry
+        stopLoss = round(Math.max(srStop, atrStop));
+      } else {
+        stopLoss = round(atrStop);
+      }
+      // Target: use nearest resistance or ATR-based, whichever is further
+      const atrTarget = entryPrice + atrMultTarget * atrVal;
+      if (nearestResistance && nearestResistance > entryPrice) {
+        // Target at resistance (or ATR target if resistance is too close)
+        targetPrice = round(Math.max(nearestResistance, atrTarget));
+      } else {
+        targetPrice = round(atrTarget);
+      }
       trailingStop = round(entryPrice - atrMultTrail * atrVal);
     } else if (signal === 'SELL') {
-      stopLoss = round(entryPrice + atrMultStop * atrVal);
-      targetPrice = round(entryPrice - atrMultTarget * atrVal);
+      // Stop loss: use nearest resistance or ATR-based
+      const atrStop = entryPrice + atrMultStop * atrVal;
+      if (nearestResistance && nearestResistance > entryPrice) {
+        const srStop = nearestResistance + atrVal * 0.3;
+        stopLoss = round(Math.min(srStop, atrStop));
+      } else {
+        stopLoss = round(atrStop);
+      }
+      // Target: use nearest support or ATR-based
+      const atrTarget = entryPrice - atrMultTarget * atrVal;
+      if (nearestSupport && nearestSupport < entryPrice) {
+        targetPrice = round(Math.min(nearestSupport, atrTarget));
+      } else {
+        targetPrice = round(atrTarget);
+      }
       trailingStop = round(entryPrice + atrMultTrail * atrVal);
     } else {
       // EXIT — just report current price
@@ -372,6 +701,12 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     }
   }
 
+  // Build S/R level strings for display
+  const supportStr = supportLevels.slice(0, 3).map(l => `₹${round(l)}`).join(' / ') || '—';
+  const resistanceStr = resistanceLevels.slice(0, 3).map(l => `₹${round(l)}`).join(' / ') || '—';
+  reasons.push(`S: ${supportStr}`);
+  reasons.push(`R: ${resistanceStr}`);
+
   return {
     symbol,
     signal,
@@ -389,6 +724,14 @@ export async function generateSignal(symbol: string): Promise<Signal> {
       superTrend: stTrend, adx: round(adxVal), atr: round(atrVal), vwap: round(vwapVal),
       obvSlope: Math.round(obvSlope), volumeRatio: round(volRatio),
       bullScore, bearScore, netScore,
+      pivot: round(pivots.pp), r1: round(pivots.r1), r2: round(pivots.r2), r3: round(pivots.r3),
+      s1: round(pivots.s1), s2: round(pivots.s2), s3: round(pivots.s3),
+      supportLevels: supportLevels.map(round),
+      resistanceLevels: resistanceLevels.map(round),
+      fibRetracement: {
+        fib236: round(fibs.fib236), fib382: round(fibs.fib382), fib500: round(fibs.fib500),
+        fib618: round(fibs.fib618), fib786: round(fibs.fib786),
+      },
     },
     timestamp: new Date().toISOString(),
     fnoRecommendation: fnoRec,

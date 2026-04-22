@@ -66,7 +66,7 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
         </div>
         <div className="text-right text-sm">
           <div className="text-[var(--bf-muted)]">Underlying</div>
-          <div className="font-bold text-lg">₹{Number(underlyingPrice).toFixed(2)}</div>
+          <div className="font-bold text-lg">₹{(Number(underlyingPrice) || 0).toFixed(2)}</div>
         </div>
       </div>
 

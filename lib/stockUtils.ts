@@ -37,9 +37,9 @@ const POPULAR_SYMBOLS = [
 const _histCache: Map<string, { ts: number; data: any[] }> = new Map();
 const HIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// quote cache (1s TTL for near-realtime prices)
+// quote cache (10s TTL — Yahoo rate-limits aggressively at sub-second polling)
 const _quoteCache: Map<string, { ts: number; data: any }> = new Map();
-const QUOTE_CACHE_TTL = 1 * 1000;
+const QUOTE_CACHE_TTL = 10 * 1000;
 
 export async function fetchQuote(symbol: string) {
   const cached = _quoteCache.get(symbol);
@@ -47,15 +47,20 @@ export async function fetchQuote(symbol: string) {
   try {
     const yf = await getYahooClient();
     const quote = await yf.quote(symbol);
+    const price = quote?.regularMarketPrice ?? quote?.currentPrice ?? 0;
+    // If Yahoo returned nothing useful, keep last good cached value rather than zeroing out
+    if (!price && cached) return cached.data;
     const result = {
       symbol,
-      price: quote?.regularMarketPrice ?? quote?.currentPrice ?? 0,
+      price,
       changePercent: quote?.regularMarketChangePercent ?? 0,
     };
     _quoteCache.set(symbol, { ts: Date.now(), data: result });
     return result;
   } catch (error) {
     console.error(`Quote error for ${symbol}:`, error);
+    // On error (e.g. 429), return last known good value instead of zeros
+    if (cached) return cached.data;
     return { symbol, price: 0, changePercent: 0 };
   }
 }
@@ -66,12 +71,22 @@ export async function getIndexPrices() {
     { id: 'NIFTY', name: 'NIFTY 50', sym: '^NSEI' },
     { id: 'SENSEX', name: 'SENSEX', sym: '^BSESN' },
     { id: 'BANKNIFTY', name: 'BANKNIFTY', sym: '^NSEBANK' },
+    { id: 'FINNIFTY', name: 'FINNIFTY', sym: 'NIFTY_FIN_SERVICE.NS' },
     { id: 'DOWJ', name: 'DOW JONES', sym: '^DJI' },
     { id: 'SP500', name: 'S&P 500', sym: '^GSPC' },
     { id: 'NASDAQ', name: 'NASDAQ', sym: '^IXIC' },
     { id: 'FTSE', name: 'FTSE 100', sym: '^FTSE' },
     { id: 'NIKKEI', name: 'NIKKEI 225', sym: '^N225' },
     { id: 'HANGSENG', name: 'HANG SENG', sym: '^HSI' },
+    // Commodities
+    { id: 'GOLD', name: 'GOLD', sym: 'GC=F' },
+    { id: 'SILVER', name: 'SILVER', sym: 'SI=F' },
+    { id: 'CRUDE', name: 'CRUDE OIL', sym: 'CL=F' },
+    { id: 'BRENT', name: 'BRENT OIL', sym: 'BZ=F' },
+    { id: 'NATGAS', name: 'NAT GAS', sym: 'NG=F' },
+    { id: 'COPPER', name: 'COPPER', sym: 'HG=F' },
+    // FX (used for live USD→INR conversion on commodity strikes)
+    { id: 'USDINR', name: 'USD/INR', sym: 'INR=X' },
   ];
 
   const results = await Promise.all(
@@ -540,8 +555,69 @@ export async function getHistorical(symbol: string, startDate?: string, endDate?
   }
 }
 
-// Suggest option strikes based on underlying price and desired tick size.
-export async function suggestOptionStrikes(symbol: string, price?: number | null, tick = 50, pads = 2) {
+/* ─────────────────────── Real NSE Option Chain ─────────────────────── */
+
+// Approximate error function for normal CDF calculations
+function erf(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1 / (1 + p * Math.abs(x));
+  return sign * (1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x));
+}
+
+// Map Yahoo symbols → NSE option chain symbol names
+const NSE_OC_MAP: Record<string, string> = {
+  '^NSEI': 'NIFTY',
+  '^NSEBANK': 'BANKNIFTY',
+  'NIFTY_FIN_SERVICE.NS': 'FINNIFTY',
+  '^CNXIT': 'NIFTY IT',
+  '^NSMIDCP': 'NIFTY MIDCAP 50',
+};
+
+// Fallback tick sizes per index
+const TICK_MAP: Record<string, number> = {
+  '^NSEI': 50, '^NSEBANK': 100, '^BSESN': 100,
+  'NIFTY_FIN_SERVICE.NS': 50, '^NSMIDCP': 25, '^CNXIT': 50,
+};
+
+// Cache for NSE option chain data (30s TTL for near-realtime)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _nseOCCache: Map<string, { ts: number; data: any }> = new Map();
+const NSE_OC_TTL = 30 * 1000;
+
+/** Fetch real NSE option chain using stock-nse-india */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchNSEOptionChain(nseSymbol: string): Promise<any | null> {
+  const cached = _nseOCCache.get(nseSymbol);
+  if (cached && Date.now() - cached.ts < NSE_OC_TTL) return cached.data;
+
+  try {
+    const { NseIndia } = await import('stock-nse-india');
+    const nse = new NseIndia();
+    const data = await nse.getIndexOptionChain(nseSymbol);
+    if (data && (data.records || data.filtered)) {
+      _nseOCCache.set(nseSymbol, { ts: Date.now(), data });
+      return data;
+    }
+    return null;
+  } catch (err) {
+    console.warn('NSE option chain fetch failed for', nseSymbol, err);
+    return null;
+  }
+}
+
+export type LiveStrike = {
+  strike: number;
+  callLTP: number | null;
+  callOI: number;
+  callIV: number | null;
+  putLTP: number | null;
+  putOI: number;
+  putIV: number | null;
+  isATM: boolean;
+};
+
+export async function suggestOptionStrikes(symbol: string, price?: number | null, tick?: number, pads = 2) {
   try {
     let p = price;
     if (p == null) {
@@ -550,15 +626,145 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
     }
     if (!p || p <= 0) return { error: 'invalid price' };
 
-    // round to nearest tick
-    const atm = Math.round(p / tick) * tick;
+    // ── Try real NSE option chain data first ──
+    const nseSymbol = NSE_OC_MAP[symbol];
+    if (nseSymbol) {
+      try {
+        const data = await fetchNSEOptionChain(nseSymbol);
+        if (data) {
+          const recs = data.records ?? {};
+          const filt = data.filtered ?? {};
+          const allData = (filt.data ?? recs.data ?? []) as Record<string, unknown>[];
+          const underlyingValue = (filt.underlyingValue ?? recs.underlyingValue ?? p) as number;
+          const expiryDates = (recs.expiryDates ?? []) as string[];
+          const nearestExpiry = expiryDates[0] ?? null;
+
+          if (allData.length > 0) {
+            // Sort by distance to spot to find ATM
+            const sorted = [...allData].sort(
+              (a, b) => Math.abs((a.strikePrice as number) - underlyingValue) - Math.abs((b.strikePrice as number) - underlyingValue)
+            );
+
+            // ATM is the strike closest to spot
+            const atmStrike = sorted[0]?.strikePrice as number ?? Math.round(underlyingValue / 50) * 50;
+
+            // Pick `pads` strikes above and below ATM
+            const allStrikesSorted = [...allData]
+              .map(d => d.strikePrice as number)
+              .sort((a, b) => a - b);
+            const atmIdx = allStrikesSorted.indexOf(atmStrike);
+            const fromIdx = Math.max(0, atmIdx - pads);
+            const toIdx = Math.min(allStrikesSorted.length - 1, atmIdx + pads);
+            const selectedStrikes = allStrikesSorted.slice(fromIdx, toIdx + 1);
+
+            // Build lookup
+            const strikeMap = new Map<number, Record<string, unknown>>();
+            for (const d of allData) strikeMap.set(d.strikePrice as number, d);
+
+            const liveStrikes: LiveStrike[] = selectedStrikes.map(s => {
+              const row = strikeMap.get(s);
+              const ce = (row?.CE ?? {}) as Record<string, unknown>;
+              const pe = (row?.PE ?? {}) as Record<string, unknown>;
+              return {
+                strike: s,
+                callLTP: (ce.lastPrice as number) ?? null,
+                callOI: (ce.openInterest as number) ?? 0,
+                callIV: (ce.impliedVolatility as number) ?? null,
+                putLTP: (pe.lastPrice as number) ?? null,
+                putOI: (pe.openInterest as number) ?? 0,
+                putIV: (pe.impliedVolatility as number) ?? null,
+                isATM: s === atmStrike,
+              };
+            });
+
+            // Derive tick from actual strike spacing
+            const derivedTick = selectedStrikes.length >= 2
+              ? selectedStrikes[1] - selectedStrikes[0]
+              : TICK_MAP[symbol] ?? 50;
+
+            // Compute DTE from expiry string
+            let daysToExpiry = 7;
+            if (nearestExpiry) {
+              const parts = nearestExpiry.split('-');
+              if (parts.length === 3) {
+                const expDate = new Date(nearestExpiry);
+                daysToExpiry = Math.max(0.5, Math.ceil((expDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+              }
+            }
+
+            // Average IV from ATM strikes
+            const atmRow = strikeMap.get(atmStrike);
+            const atmCeIV = ((atmRow?.CE as Record<string, unknown>)?.impliedVolatility as number) ?? 0;
+            const atmPeIV = ((atmRow?.PE as Record<string, unknown>)?.impliedVolatility as number) ?? 0;
+            const avgIV = atmCeIV > 0 && atmPeIV > 0 ? (atmCeIV + atmPeIV) / 2 : (atmCeIV || atmPeIV || 0);
+
+            return {
+              symbol,
+              price: Number(underlyingValue.toFixed(2)),
+              atm: atmStrike,
+              tick: derivedTick,
+              strikes: selectedStrikes,
+              liveStrikes,
+              expiry: nearestExpiry,
+              daysToExpiry,
+              iv: Math.round(avgIV * 100) / 100,
+              live: true,
+            };
+          }
+        }
+      } catch (nseErr) {
+        console.warn('NSE option chain error, using fallback:', nseErr);
+      }
+    }
+
+    // ── Fallback: calculated strikes (for SENSEX or when NSE is unavailable) ──
+    const resolvedTick = tick ?? TICK_MAP[symbol] ?? 50;
+    const atm = Math.round(p / resolvedTick) * resolvedTick;
     const strikes: number[] = [];
-    for (let i = -pads; i <= pads; i++) strikes.push(atm + i * tick);
+    for (let i = -pads; i <= pads; i++) strikes.push(atm + i * resolvedTick);
 
-    // simple recommendation: if bullish signal → buy CALL at ATM or +1; bearish → buy PUT at ATM or -1
-    // We don't compute signal here; caller can pass intended direction or use calculateAISignal.
+    // Calculate nearest expiry. SENSEX (BSE) expires on Fridays, NSE indices on Thursdays.
+    const isBSE = symbol === '^BSESN';
+    const expiryDay = isBSE ? 4 : 2; // 4=Thursday (BSE/SENSEX), 2=Tuesday (NSE)
+    const now = new Date();
+    const today = now.getDay(); // 0=Sun
+    let daysUntilExpiry = (expiryDay - today + 7) % 7;
+    // If today is expiry day and market is past 15:30 IST, use next week
+    if (daysUntilExpiry === 0) {
+      const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes()) + 330;
+      if (istMin > 15 * 60 + 30) daysUntilExpiry = 7;
+    }
+    const expiryDate = new Date(now);
+    expiryDate.setDate(expiryDate.getDate() + daysUntilExpiry);
+    const expiryStr = `${String(expiryDate.getDate()).padStart(2, '0')}-${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiryDate.getMonth()]}-${expiryDate.getFullYear()}`;
+    const dte = Math.max(0.5, Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
 
-    return { symbol, price: Number(p.toFixed(2)), atm, tick, strikes };
+    // Build estimated live strikes with Black-Scholes premiums
+    const estLiveStrikes: LiveStrike[] = strikes.map(s => {
+      const dteForCalc = Math.max(0.5, dte);
+      const t = dteForCalc / 365;
+      const r = 0.065;
+      const moneyness = Math.abs(p - s) / p;
+      const iv = 0.15 + moneyness * 0.4;
+      const d1 = (Math.log(p / s) + (r + iv * iv / 2) * t) / (iv * Math.sqrt(t));
+      const d2 = d1 - iv * Math.sqrt(t);
+      const nd1 = 0.5 * (1 + erf(d1 / Math.sqrt(2)));
+      const nd2 = 0.5 * (1 + erf(d2 / Math.sqrt(2)));
+      const callP = Math.max(0.5, p * nd1 - s * Math.exp(-r * t) * nd2);
+      const putP = Math.max(0.5, s * Math.exp(-r * t) * (1 - nd2) - p * (1 - nd1));
+      return {
+        strike: s,
+        callLTP: Math.round(callP * 100) / 100,
+        callOI: 0,
+        callIV: Math.round(iv * 10000) / 100,
+        putLTP: Math.round(putP * 100) / 100,
+        putOI: 0,
+        putIV: Math.round(iv * 10000) / 100,
+        isATM: s === atm,
+      };
+    });
+
+    return { symbol, price: Number(p.toFixed(2)), atm, tick: resolvedTick, strikes, liveStrikes: estLiveStrikes, expiry: expiryStr, daysToExpiry: dte, iv: 15, live: false };
   } catch (e) {
     console.error('suggestOptionStrikes error', e);
     return { error: String(e) };

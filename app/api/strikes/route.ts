@@ -6,7 +6,8 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const symbol = url.searchParams.get('symbol');
-    const tick = Number(url.searchParams.get('tick') ?? '50');
+    const tickParam = url.searchParams.get('tick');
+    const tick = tickParam ? Number(tickParam) : undefined; // let stockUtils use correct tick per symbol
     const pads = Number(url.searchParams.get('pads') ?? '2');
     if (!symbol) return NextResponse.json({ error: 'symbol required' }, { status: 400 });
 

@@ -69,25 +69,83 @@ async function getSubscribers(): Promise<Array<{ id: string; email?: string; pus
 export async function broadcastAlert(signal: Signal) {
   await ensureDataDir();
   const subscribers = await getSubscribers();
-  const subject = `🔔 ${signal.signal} Signal: ${signal.symbol}`;
-  const body = `${signal.signal} ${signal.symbol} @ ₹${signal.entryPrice.toFixed(2)}
-Entry: ₹${signal.entryPrice.toFixed(2)}
-Stop Loss: ${signal.stopLoss ? '₹' + signal.stopLoss.toFixed(2) : 'N/A'}
-Target: ${signal.targetPrice ? '₹' + signal.targetPrice.toFixed(2) : 'N/A'}
-Strength: ${signal.strength}% | Confidence: ${(signal.confidence * 100).toFixed(0)}%
-Reason: ${signal.reason}
-${signal.fnoRecommendation ? `\nF&O: ${signal.fnoRecommendation.type} ${signal.fnoRecommendation.strike ? '@ ' + signal.fnoRecommendation.strike : ''}` : ''}
-Time: ${signal.timestamp}`;
 
-  const html = `<div style="font-family:sans-serif;padding:16px;background:#071026;color:#e0e0e0;border-radius:8px">
-    <h2 style="color:${signal.signal === 'BUY' ? '#00ff99' : signal.signal === 'SELL' ? '#ff4d4f' : '#ffa500'}">${signal.signal} — ${signal.symbol}</h2>
-    <p><strong>Entry:</strong> ₹${signal.entryPrice.toFixed(2)}</p>
-    <p><strong>Stop Loss:</strong> ${signal.stopLoss ? '₹' + signal.stopLoss.toFixed(2) : 'N/A'}</p>
-    <p><strong>Target:</strong> ${signal.targetPrice ? '₹' + signal.targetPrice.toFixed(2) : 'N/A'}</p>
-    <p><strong>Strength:</strong> ${signal.strength}% &nbsp; <strong>Confidence:</strong> ${(signal.confidence * 100).toFixed(0)}%</p>
-    <p style="color:#9aa7bd;font-size:13px">${signal.reason}</p>
-    ${signal.fnoRecommendation ? `<p><strong>F&O:</strong> ${signal.fnoRecommendation.type} ${signal.fnoRecommendation.strike ? '@ ₹' + signal.fnoRecommendation.strike : ''}</p>` : ''}
-    <p style="color:#666;font-size:11px">${signal.timestamp}</p>
+  // Compute professional trade call format
+  const dir = signal.signal;
+  const isCall = dir === 'BUY';
+  const isPut = dir === 'SELL';
+  const price = signal.entryPrice;
+
+  // Compute expiry (Friday for BSE/SENSEX, Thursday for NSE)
+  const MONTHS_S = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+  const isBSE = signal.symbol === '^BSESN' || signal.symbol.includes('SENSEX');
+  const expiryDay = isBSE ? 4 : 2; // 4=Thursday (BSE/SENSEX), 2=Tuesday (NSE)
+  const now = new Date();
+  let daysUntil = (expiryDay - now.getDay() + 7) % 7;
+  if (daysUntil === 0) {
+    const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes()) + 330;
+    if (istMin > 15 * 60 + 30) daysUntil = 7;
+  }
+  const expDate = new Date(now);
+  expDate.setDate(expDate.getDate() + daysUntil);
+  const expiryStr = `${expDate.getDate()} ${MONTHS_S[expDate.getMonth()]} ${expDate.getFullYear()}`;
+
+  // Compute strike and option type
+  const sym = signal.symbol.replace('.NS', '').replace('^', '');
+  const shortName = sym === 'NSEI' ? 'NIFTY' : sym === 'NSEBANK' ? 'BANKNIFTY' : sym === 'BSESN' ? 'SENSEX' : sym;
+  const optType = isCall ? 'CE' : isPut ? 'PE' : '';
+  const tick = price >= 50000 ? 100 : price >= 10000 ? 50 : price >= 500 ? 25 : 10;
+  const atm = Math.round(price / tick) * tick;
+  const fnoStrike = signal.fnoRecommendation?.strike ?? (isCall ? atm + tick : isPut ? atm - tick : atm);
+
+  // Estimate premium
+  const dteVal = Math.max(0.5, Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+  const t = dteVal / 365;
+  const r = 0.065;
+  const moneyness = Math.abs(price - fnoStrike) / price;
+  const iv = 0.15 + moneyness * 0.4;
+  const d1 = (Math.log(price / fnoStrike) + (r + iv * iv / 2) * t) / (iv * Math.sqrt(t));
+  const d2 = d1 - iv * Math.sqrt(t);
+  const nd = (x: number) => { const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911; const s=x<0?-1:1; const tt=1/(1+p*Math.abs(x)); const y=1-(((((a5*tt+a4)*tt)+a3)*tt+a2)*tt+a1)*tt*Math.exp(-x*x/2); return 0.5*(1+s*y); };
+  const callP = Math.max(0.5, price * nd(d1) - fnoStrike * Math.exp(-r * t) * nd(d2));
+  const putP = Math.max(0.5, fnoStrike * Math.exp(-r * t) * nd(-d2) - price * nd(-d1));
+  const premium = Math.round((isCall ? callP : putP) * 100) / 100;
+  const lo = Math.floor(premium / 5) * 5 || Math.floor(premium);
+  const hi = lo + 5;
+
+  // SL/Targets from premium
+  const conf = Math.max(signal.strength, 40) / 100;
+  const slPrem = Math.round(premium * (0.35 + (1 - conf) * 0.25));
+  const t1 = Math.round(premium * (1.8 + conf * 0.7));
+  const t2 = Math.round(premium * (2.5 + conf * 1.0));
+  const t3 = Math.round(premium * (3.5 + conf * 1.5));
+
+  const hasFnO = isCall || isPut;
+  const tradeCallLine = hasFnO
+    ? `${shortName} ${expiryStr} ${optType} ${fnoStrike.toFixed(2)} @ ${lo}-${hi}`
+    : `${dir} ${shortName} @ ₹${price.toFixed(2)}`;
+
+  const subject = `🔔 ${tradeCallLine}`;
+  const body = hasFnO
+    ? `${tradeCallLine}\n\nSTOPLOSS: ${slPrem}\n\nTARGETS: ${t1}-${t2}-${t3}\n\nSpot: ₹${price.toFixed(2)}\nStrength: ${signal.strength}% | Confidence: ${(signal.confidence * 100).toFixed(0)}%\n\nSupport/Resistance:\n${signal.reason}\n\nTime: ${signal.timestamp}`
+    : `${dir} ${signal.symbol} @ ₹${price.toFixed(2)}\n\nEntry: ₹${price.toFixed(2)}\nStop Loss: ${signal.stopLoss ? '₹' + signal.stopLoss.toFixed(2) : 'N/A'}\nTarget: ${signal.targetPrice ? '₹' + signal.targetPrice.toFixed(2) : 'N/A'}\nStrength: ${signal.strength}%\n\n${signal.reason}\n\nTime: ${signal.timestamp}`;
+
+  const sigColor = signal.signal === 'BUY' ? '#00ff99' : signal.signal === 'SELL' ? '#ff4d4f' : '#ffa500';
+  const html = `<div style="font-family:monospace;padding:20px;background:#071026;color:#e0e0e0;border-radius:12px;border:2px solid ${sigColor}">
+    <h2 style="color:${sigColor};margin:0 0 12px 0;font-size:20px">${hasFnO ? (isCall ? '📈' : '📉') : '🔔'} ${tradeCallLine}</h2>
+    ${hasFnO ? `
+    <p style="color:#ff4d4f;font-weight:900;font-size:16px;margin:8px 0">🛑 STOPLOSS: ${slPrem}</p>
+    <p style="color:#00d4ff;font-weight:900;font-size:16px;margin:8px 0">🎯 TARGETS: ${t1}-${t2}-${t3}</p>
+    <hr style="border-color:#333;margin:12px 0">
+    <p style="margin:4px 0"><strong>Spot:</strong> ₹${price.toFixed(2)}</p>
+    ` : `
+    <p style="margin:4px 0"><strong>Entry:</strong> ₹${price.toFixed(2)}</p>
+    <p style="margin:4px 0"><strong>Stop Loss:</strong> ${signal.stopLoss ? '₹' + signal.stopLoss.toFixed(2) : 'N/A'}</p>
+    <p style="margin:4px 0"><strong>Target:</strong> ${signal.targetPrice ? '₹' + signal.targetPrice.toFixed(2) : 'N/A'}</p>
+    `}
+    <p style="margin:4px 0"><strong>Strength:</strong> ${signal.strength}% &nbsp; <strong>Confidence:</strong> ${(signal.confidence * 100).toFixed(0)}%</p>
+    <p style="color:#9aa7bd;font-size:12px;margin:8px 0">${signal.reason}</p>
+    <p style="color:#666;font-size:11px;margin:8px 0">${signal.timestamp}</p>
   </div>`;
 
   const results: any[] = [];

@@ -1,24 +1,15 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+import { clerkMiddleware } from '@clerk/nextjs/server';
 
-const isProtectedRoute = createRouteMatcher([
-  '/dashboard(.*)',
-  '/signals(.*)',
-  '/watchlist(.*)',
-  '/profile(.*)',
-]);
-
-export const proxy = clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
-    const a = await auth();
-    if (a && typeof (a as any).protect === 'function') (a as any).protect();
-  }
-});
+// Next.js 16 uses proxy.ts (replacement for middleware.ts).
+// clerkMiddleware() attaches auth context so server-side `auth()` works in API routes.
+// We DO NOT call `auth.protect()` here, so no routes are auto-redirected — prevents
+// the dev-key redirect loops that hit production earlier. Page-level guards handle
+// protected surfaces.
+export default clerkMiddleware();
 
 export const config = {
   matcher: [
-    // Skip Next.js internals and all static files
     '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    // Always run for API routes
     '/(api|trpc)(.*)',
   ],
 };
