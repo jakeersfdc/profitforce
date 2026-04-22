@@ -1,7 +1,15 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
-  // output: "standalone", // Enable for Docker/self-hosting only
+  // Standalone output is required by Dockerfile.web (Cloud Run / self-host).
+  // Vercel ignores this safely. Toggle off via NEXT_OUTPUT=default if a
+  // platform ever needs the legacy server build.
+  output: process.env.NEXT_OUTPUT === "default" ? undefined : "standalone",
+  // Pin the tracing root to THIS directory so standalone output lands at
+  // .next/standalone/server.js (not nested under a project-name subfolder),
+  // matching what Dockerfile.web expects.
+  outputFileTracingRoot: path.join(__dirname),
   serverExternalPackages: ["pg", "nodemailer", "firebase-admin", "jsonwebtoken"],
   images: {
     remotePatterns: [
