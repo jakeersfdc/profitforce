@@ -43,6 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [node-tests, python-tests]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
@@ -61,11 +64,11 @@ jobs:
           context: .
           file: Dockerfile.web
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ github.repository }}:web-${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}:web-${{ github.sha }}
       - name: Build and push ml image
         uses: docker/build-push-action@v4
         with:
           context: .
           file: Dockerfile.ml
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ github.repository }}:ml-${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}:ml-${{ github.sha }}
