@@ -5,6 +5,7 @@ import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
 import { SebiSignalNote } from "@/components/SebiCompliance";
+import { usdToMcxInr, commodityUnit, roundMcxStrike } from "@/lib/commodity";
 
 /* ─────────────────────── Types ─────────────────────── */
 type IndexData = {
@@ -728,11 +729,39 @@ export default function DashboardClient() {
         </div>
       </section>
 
-      {/* ━━━ COMMODITIES ━━━ */}
+      {/* ━━━ COMMODITIES (MCX INR equivalent — Yahoo COMEX/NYMEX × live FX) ━━━ */}
       <section>
-        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">Commodities</h2>
+        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">
+          Commodities <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• MCX equivalent @ ₹{usdInr.toFixed(2)}/USD</span>
+        </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          {commodityIdx.map((idx) => <IndexCardSmall key={idx.id} idx={idx} fl={flash[idx.id]} onChartClick={() => setChartTarget({ symbol: idx.sym, name: idx.name, entry: null, sl: null, target: null, signal: "HOLD", currentPrice: idx.price })} />)}
+          {commodityIdx.map((idx) => {
+            const usd = idx.price ?? 0;
+            const inr = usdToMcxInr(idx.id, usd, usdInr);
+            const unit = commodityUnit(idx.id);
+            const display: IndexData = { ...idx, price: inr };
+            return (
+              <IndexCardSmall
+                key={idx.id}
+                idx={display}
+                fl={flash[idx.id]}
+                currencyPrefix="₹"
+                unitLabel={unit}
+                subLabel={usd > 0 ? `$${usd.toFixed(2)}` : undefined}
+                onChartClick={() =>
+                  setChartTarget({
+                    symbol: idx.sym,
+                    name: idx.name,
+                    entry: null,
+                    sl: null,
+                    target: null,
+                    signal: "HOLD",
+                    currentPrice: idx.price,
+                  })
+                }
+              />
+            );
+          })}
         </div>
       </section>
 
@@ -1347,19 +1376,23 @@ function IndexCard({ idx, fl, onChartClick }: { idx: IndexData; fl?: "up" | "dow
   );
 }
 
-function IndexCardSmall({ idx, fl, onChartClick }: { idx: IndexData; fl?: "up" | "down"; onChartClick?: () => void }) {
+function IndexCardSmall({ idx, fl, onChartClick, currencyPrefix, unitLabel, subLabel }: { idx: IndexData; fl?: "up" | "down"; onChartClick?: () => void; currencyPrefix?: string; unitLabel?: string; subLabel?: string }) {
   const up = (idx.change ?? 0) >= 0;
   const p = pts(idx.price, idx.change);
   return (
     <div onClick={onChartClick} className={`rounded-lg p-2.5 border transition-all duration-300 cursor-pointer hover:scale-[1.03] ${fl === "up" ? "ring-1 ring-green-400" : fl === "down" ? "ring-1 ring-red-400" : ""} ${up ? "border-green-600/40 bg-green-950/20" : "border-red-600/40 bg-red-950/20"}`}>
-      <div className="text-[10px] text-white/70 truncate font-medium">{idx.name}</div>
+      <div className="text-[10px] text-white/70 truncate font-medium flex items-center justify-between gap-1">
+        <span className="truncate">{idx.name}</span>
+        {unitLabel && <span className="text-[9px] text-white/40 shrink-0">/{unitLabel}</span>}
+      </div>
       <div className={`text-sm font-extrabold tabular-nums ${up ? "text-green-400" : "text-red-400"}`}>
-        {idx.price != null ? idx.price.toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"}
+        {idx.price != null ? `${currencyPrefix ?? ""}${idx.price.toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "—"}
       </div>
       <div className={`text-[10px] font-bold ${up ? "text-green-300" : "text-red-300"}`}>
         {up ? "▲" : "▼"} {pct(idx.change)}
         {p != null && <span className="ml-1 text-white/60">({up ? "+" : ""}{p.toFixed(2)})</span>}
       </div>
+      {subLabel && <div className="text-[9px] text-white/30 mt-0.5 tabular-nums">{subLabel}</div>}
     </div>
   );
 }
@@ -1635,6 +1668,11 @@ function MyPositions({ trades, onExit, onRemove, onChartClick }: {
 
 /* ─────────────────── Commodity Predictions ─────────────────── */
 
+// SEBI-grade safety: only publish a BUY/SELL call when the SignalEngine's
+// confidence clears this threshold. Below it we default to HOLD ("no trade")
+// so the app never pushes a low-conviction call to retail users.
+const COMMODITY_MIN_STRENGTH = 60;
+
 function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities: IndexData[]; usdInr: number; onBuyTrade?: (t: Omit<TrackedTrade, "id" | "boughtAt" | "status">) => void }) {
   const withData = commodities.filter(c => c.price != null && c.change != null);
 
@@ -1642,9 +1680,8 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
   // commodity symbol, the same engine that produces stock & index calls
   // (EMA alignment, RSI, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV,
   // Pivot/Fib S&R, candle patterns, and the trend-aware counter-trend veto).
-  // This replaces the previous heuristic that just thresholded today's %
-  // change, which was producing "not exact" predictions.
   const [cmdSignals, setCmdSignals] = useState<Record<string, Signal | null>>({});
+  const [signalsLoaded, setSignalsLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -1664,6 +1701,7 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
       const next: Record<string, Signal | null> = {};
       for (const [id, sig] of results) next[id] = sig;
       setCmdSignals(next);
+      setSignalsLoaded(true);
     };
     load();
     // Refresh every 60s so commodity calls track intraday technical shifts.
@@ -1676,21 +1714,23 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
 
   const predictions = withData.map(c => {
     const price = c.price ?? 0;
-    const change = c.change ?? 0;
     // Per-commodity daily volatility (fallback when ATR unavailable)
     const volPct = c.id === "NATGAS" ? 0.025 : c.id === "SILVER" ? 0.018 : c.id === "CRUDE" || c.id === "BRENT" ? 0.015 : c.id === "COPPER" ? 0.012 : c.id === "GOLD" ? 0.008 : 0.012;
 
-    // Real signal from SignalEngine. Falls back to "HOLD" while the fetch
-    // is in-flight (rather than the old noisy +0.4% threshold).
     const sig = cmdSignals[c.id];
+    const hasSignal = !!sig;
     const sigDir = String(sig?.signal ?? "HOLD").toUpperCase();
-    const signal: "BUY" | "SELL" | "HOLD" =
-      sigDir === "BUY" ? "BUY" : sigDir === "SELL" ? "SELL" : "HOLD";
+    const engineStrength = Number.isFinite(sig?.strength) ? (sig!.strength as number) : 0;
 
-    // Use engine-provided strength/entry/SL/target where available.
-    const strength = Number.isFinite(sig?.strength)
-      ? (sig!.strength as number)
-      : Math.min(95, Math.max(35, Math.round(50 + Math.abs(change) * 12)));
+    // SEBI-grade gating: we only emit a tradable call when the engine is
+    // confident enough. Below the floor, or when no data, we report HOLD.
+    let signal: "BUY" | "SELL" | "HOLD" = "HOLD";
+    if (hasSignal && engineStrength >= COMMODITY_MIN_STRENGTH) {
+      if (sigDir === "BUY") signal = "BUY";
+      else if (sigDir === "SELL") signal = "SELL";
+    }
+
+    const strength = engineStrength;
     const engineEntry = Number(sig?.entryPrice ?? 0);
     const engineSL = Number(sig?.stopLoss ?? 0);
     const engineTgt = Number(sig?.targetPrice ?? 0);
@@ -1698,10 +1738,8 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
     let entry = price, sl = 0, t1 = 0, t2 = 0, t3 = 0;
     if (signal === "BUY") {
       entry = engineEntry > 0 ? engineEntry : price;
-      // Use engine's ATR-based stop if it sits inside the volatility envelope.
       sl = engineSL > 0 && engineSL < entry ? engineSL : entry * (1 - volPct);
       const riskPct = entry > 0 ? (entry - sl) / entry : volPct;
-      // Staggered targets scaled off actual risk (1R / 1.8R / 2.8R).
       t1 = engineTgt > 0 ? engineTgt : entry * (1 + riskPct * 1.0);
       t2 = entry * (1 + Math.max(riskPct * 1.8, volPct * 1.8));
       t3 = entry * (1 + Math.max(riskPct * 2.8, volPct * 2.8));
@@ -1719,35 +1757,20 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
       t3 = price * (1 + volPct * 2.2);
     }
     const reason = sig?.reason ?? "";
-    return { ...c, signal, strength, entry, sl, t1, t2, t3, volPct, reason };
+    return { ...c, signal, strength, entry, sl, t1, t2, t3, volPct, reason, hasSignal };
   });
 
   const fmt = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-
-  // USD (Yahoo COMEX/NYMEX) → MCX INR, using LIVE USD/INR FX + physical unit conversions.
-  // GOLD:    $/oz    → ₹/10g    = USD × fx × (10 / 31.1035)
-  // SILVER:  $/oz    → ₹/kg     = USD × fx × (1000 / 31.1035)
-  // CRUDE:   $/bbl   → ₹/bbl    = USD × fx
-  // BRENT:   $/bbl   → ₹/bbl    = USD × fx
-  // NATGAS:  $/mmBtu → ₹/mmBtu  = USD × fx
-  // COPPER:  $/lb    → ₹/kg     = USD × fx × (1 / 0.4536)
   const fx = usdInr > 0 ? usdInr : 83;
-  const usdToMcx = (id: string, usd: number) => {
-    if (id === "GOLD") return usd * fx * (10 / 31.1035);
-    if (id === "SILVER") return usd * fx * (1000 / 31.1035);
-    if (id === "COPPER") return usd * fx * (1 / 0.4536);
-    return usd * fx; // CRUDE, BRENT, NATGAS
-  };
-
-  // Real MCX option strike intervals (INR)
-  const roundStrike = (id: string, mcxPrice: number) => {
-    const step = id === "GOLD" ? 100 : id === "SILVER" ? 500 : id === "CRUDE" || id === "BRENT" ? 50 : id === "NATGAS" ? 2 : id === "COPPER" ? 5 : 10;
-    return Math.round(mcxPrice / step) * step;
-  };
+  const usdToMcx = (id: string, usd: number) => usdToMcxInr(id, usd, fx);
+  const roundStrike = (id: string, mcxPrice: number) => roundMcxStrike(id, mcxPrice);
 
   return (
     <section>
-      <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">🛢️ Commodity Option Recommendations — What to Buy / Sell / Exit <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• Live USD/INR ₹{fx.toFixed(2)}</span></h2>
+      <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-2">🛢️ Commodity Option Recommendations — MCX INR <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• Live USD/INR ₹{fx.toFixed(2)}</span></h2>
+      {!signalsLoaded && (
+        <div className="text-[11px] text-white/50 mb-3">⏳ Fetching real-time technical analysis — no call will be shown until indicators confirm.</div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {predictions.map(p => {
           const isBuy = p.signal === "BUY";
@@ -1768,12 +1791,15 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
           const estPremium = mcxPrice * premFactor;
           const premExit = estPremium * 1.6; // ~60% gain target
           const premSL = estPremium * 0.6;   // ~40% drop SL
-          const unit = p.id === "GOLD" ? "₹/10g" : p.id === "SILVER" ? "₹/kg" : p.id === "COPPER" ? "₹/kg" : p.id === "NATGAS" ? "₹/mmBtu" : "₹/bbl";
+          const unit = `₹/${commodityUnit(p.id) || "unit"}`;
+          const waitingForData = !signalsLoaded || !p.hasSignal;
           const actionLine = isBuy
             ? `BUY ${p.name} ${strike} CE`
             : isSell
             ? `BUY ${p.name} ${strike} PE`
-            : `WAIT — No clear setup`;
+            : waitingForData
+            ? `Collecting data…`
+            : `NO TRADE — Confidence below ${COMMODITY_MIN_STRENGTH}%`;
           return (
             <div key={p.id} className={`rounded-xl border bg-[#0a1628] p-3 space-y-2.5 border-${color}-500/40`}>
               {/* Header: commodity + LTP */}
@@ -1883,7 +1909,11 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
           );
         })}
       </div>
-      <div className="text-[10px] text-white/40 mt-2">⚠️ Commodity option premiums are estimates (ATM). Actual prices vary by expiry & IV — verify on broker before trading. Strikes rounded to standard MCX steps.</div>
+      <div className="text-[10px] text-white/50 mt-3 space-y-1 leading-relaxed">
+        <div>📡 <span className="text-white/70">Data source:</span> Yahoo Finance COMEX/NYMEX/ICE USD futures, converted to ₹ MCX equivalent using live USD/INR. Indicative only — actual MCX contracts may differ by 2-5% due to basis, duty &amp; liquidity.</div>
+        <div>🎯 <span className="text-white/70">Method:</span> SignalEngine (EMA 9/21/50/200, RSI-14, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV, Pivot / Fib / swing S&amp;R, candle patterns) with trend-aware counter-trend veto. Calls are published only when confidence ≥ {COMMODITY_MIN_STRENGTH}%.</div>
+        <div>⚠️ <span className="text-white/70">Disclaimer:</span> Educational / informational content. Not investment advice. Option premiums shown are approximate ATM estimates — verify LTP, IV &amp; expiry on your broker before any trade. Derivatives involve substantial risk of loss.</div>
+      </div>
     </section>
   );
 }
