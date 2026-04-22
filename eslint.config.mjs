@@ -12,6 +12,13 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Sub-projects and runtime scripts have their own toolchains and
+    // linting rules — don't block the Next.js web build on them:
+    "mobile/**",
+    "mobile-expo/**",
+    "scripts/**",
+    "proxy.ts",
+    "ml/**",
   ]),
 ]);
 
