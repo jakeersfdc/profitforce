@@ -33,11 +33,11 @@ const POPULAR_SYMBOLS = [
   'HINDUNILVR.NS', 'ITC.NS', 'KOTAKBANK.NS', 'BHARTIARTL.NS'
 ];
 
-// lightweight in-memory cache for historical queries
+// Historical cache — short TTL so intraday signals stay fresh.
 const _histCache: Map<string, { ts: number; data: any[] }> = new Map();
-const HIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const HIST_CACHE_TTL = 60 * 1000; // 60s (was 5m — caused stale predictions)
 
-// quote cache (10s TTL — Yahoo rate-limits aggressively at sub-second polling)
+// Quote cache (10s TTL — Yahoo rate-limits aggressively at sub-second polling)
 const _quoteCache: Map<string, { ts: number; data: any }> = new Map();
 const QUOTE_CACHE_TTL = 10 * 1000;
 
@@ -53,6 +53,15 @@ export async function fetchQuote(symbol: string) {
     const result = {
       symbol,
       price,
+      // full OHLC for today so SignalEngine can inject a "live" bar and avoid
+      // trading on stale yesterday-close data.
+      dayHigh: Number(quote?.regularMarketDayHigh ?? price),
+      dayLow: Number(quote?.regularMarketDayLow ?? price),
+      dayOpen: Number(quote?.regularMarketOpen ?? price),
+      prevClose: Number(quote?.regularMarketPreviousClose ?? price),
+      volume: Number(quote?.regularMarketVolume ?? 0),
+      marketTime: Number(quote?.regularMarketTime ?? Math.floor(Date.now() / 1000)),
+      marketState: String(quote?.marketState ?? ""),
       changePercent: quote?.regularMarketChangePercent ?? 0,
     };
     _quoteCache.set(symbol, { ts: Date.now(), data: result });
@@ -521,7 +530,10 @@ export async function getHistorical(symbol: string, startDate?: string, endDate?
   const yf = await getYahooClient();
   try {
     // Ensure period1/period2 are provided in a format accepted by yahoo-finance2.
-    const end = endDate ? new Date(endDate) : new Date();
+    // IMPORTANT: yahoo-finance2's `historical` API treats period2 as EXCLUSIVE.
+    // If we pass today's date, today's bar is dropped — indicators then run on
+    // yesterday's close and feel "stale". Add +1 day so today is included.
+    const end = endDate ? new Date(endDate) : new Date(Date.now() + 24 * 60 * 60 * 1000);
     const start = startDate ? new Date(startDate) : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
     // convert to ISO date strings which yahoo-finance2 accepts as date'ish
     const period1 = start.toISOString().slice(0, 10);

@@ -308,9 +308,60 @@ export interface FnORecommendation {
 // ── Main signal generator ─────────────────────────────────────────────────────
 
 export async function generateSignal(symbol: string): Promise<Signal> {
-  const hist = await getHistorical(symbol, undefined, undefined, '1d');
+  const [histRaw, liveQuoteEarly] = await Promise.all([
+    getHistorical(symbol, undefined, undefined, '1d'),
+    fetchQuote(symbol),
+  ]);
+
+  // Splice today's live bar into the historical series so every indicator
+  // (RSI, MACD, Bollinger, EMA, SuperTrend, ADX, ATR, VWAP, OBV) reflects
+  // the CURRENT market instead of yesterday's close. This is the difference
+  // between "feels stale" and "matches what a trader sees on screen".
+  const hist = Array.isArray(histRaw) ? [...histRaw] : [];
+  const liveQ = liveQuoteEarly as {
+    price?: number;
+    dayHigh?: number;
+    dayLow?: number;
+    dayOpen?: number;
+    volume?: number;
+  } | null;
+  const ltp = Number(liveQ?.price ?? 0);
+  if (ltp > 0 && hist.length > 0) {
+    const last = hist[hist.length - 1];
+    const lastDate = last?.date ? new Date(last.date) : null;
+    const today = new Date();
+    const sameDay = lastDate &&
+      lastDate.getUTCFullYear() === today.getUTCFullYear() &&
+      lastDate.getUTCMonth() === today.getUTCMonth() &&
+      lastDate.getUTCDate() === today.getUTCDate();
+    const dayHigh = Number(liveQ?.dayHigh ?? ltp);
+    const dayLow = Number(liveQ?.dayLow ?? ltp);
+    const dayOpen = Number(liveQ?.dayOpen ?? last?.open ?? ltp);
+    const dayVol = Number(liveQ?.volume ?? last?.volume ?? 0);
+    if (sameDay) {
+      // Update today's bar with the latest LTP + day high/low/volume.
+      hist[hist.length - 1] = {
+        ...last,
+        high: Math.max(Number(last.high ?? 0), dayHigh, ltp),
+        low: Math.min(Number(last.low ?? Number.MAX_VALUE), dayLow, ltp),
+        close: ltp,
+        volume: Math.max(Number(last.volume ?? 0), dayVol),
+      };
+    } else {
+      // Today's bar missing entirely — append it.
+      hist.push({
+        date: today.toISOString(),
+        open: dayOpen,
+        high: Math.max(dayHigh, ltp, dayOpen),
+        low: Math.min(dayLow > 0 ? dayLow : ltp, ltp, dayOpen),
+        close: ltp,
+        volume: dayVol,
+      });
+    }
+  }
+
   if (!Array.isArray(hist) || hist.length < 50) {
-    const quote = await fetchQuote(symbol);
+    const quote = liveQuoteEarly ?? await fetchQuote(symbol);
     return {
       symbol, signal: 'HOLD', entryPrice: quote.price, stopLoss: null, targetPrice: null,
       trailingStop: null, strength: 0, confidence: 0, reason: 'Insufficient data (need 50+ bars)',

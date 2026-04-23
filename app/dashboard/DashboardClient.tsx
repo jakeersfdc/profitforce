@@ -5,7 +5,7 @@ import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
 import { SebiSignalNote } from "@/components/SebiCompliance";
-import { usdToMcxInr, commodityUnit, roundMcxStrike } from "@/lib/commodity";
+import { usdToMcxInr, commodityUnit, roundMcxStrike, mcxPremiumPct } from "@/lib/commodity";
 
 /* ─────────────────────── Types ─────────────────────── */
 type IndexData = {
@@ -1910,8 +1910,8 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
         })}
       </div>
       <div className="text-[10px] text-white/50 mt-3 space-y-1 leading-relaxed">
-        <div>📡 <span className="text-white/70">Data source:</span> Yahoo Finance COMEX/NYMEX/ICE USD futures, converted to ₹ MCX equivalent using live USD/INR. Indicative only — actual MCX contracts may differ by 2-5% due to basis, duty &amp; liquidity.</div>
-        <div>🎯 <span className="text-white/70">Method:</span> SignalEngine (EMA 9/21/50/200, RSI-14, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV, Pivot / Fib / swing S&amp;R, candle patterns) with trend-aware counter-trend veto. Calls are published only when confidence ≥ {COMMODITY_MIN_STRENGTH}%.</div>
+        <div>📡 <span className="text-white/70">Data source:</span> Yahoo Finance COMEX/NYMEX/ICE USD futures, converted to ₹ MCX equivalent using <strong>live USD/INR + Indian import-duty &amp; GST premium</strong> (GOLD ~{mcxPremiumPct("GOLD").toFixed(0)}%, SILVER ~{mcxPremiumPct("SILVER").toFixed(0)}%, COPPER ~{mcxPremiumPct("COPPER").toFixed(0)}%; CRUDE/BRENT/NATGAS ~0%). Actual MCX LTP may vary 1-3% due to contract-month basis &amp; liquidity.</div>
+        <div>🎯 <span className="text-white/70">Method:</span> SignalEngine with today&apos;s live bar injected (EMA 9/21/50/200, RSI-14, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV, Pivot / Fib / swing S&amp;R, candle patterns) + trend-aware counter-trend veto. Calls published only when confidence ≥ {COMMODITY_MIN_STRENGTH}%.</div>
         <div>⚠️ <span className="text-white/70">Disclaimer:</span> Educational / informational content. Not investment advice. Option premiums shown are approximate ATM estimates — verify LTP, IV &amp; expiry on your broker before any trade. Derivatives involve substantial risk of loss.</div>
       </div>
     </section>
