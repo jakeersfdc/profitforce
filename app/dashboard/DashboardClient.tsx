@@ -5,7 +5,7 @@ import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
 import { SebiSignalNote } from "@/components/SebiCompliance";
-import { usdToMcxInr, commodityUnit, roundMcxStrike, mcxPremiumPct } from "@/lib/commodity";
+import { usdToMcxEstimateWithAnchor, commodityUnit, roundMcxStrike, mcxPremiumPct, type RuntimeAnchorMap } from "@/lib/commodity";
 
 /* ─────────────────────── Types ─────────────────────── */
 type IndexData = {
@@ -639,6 +639,27 @@ export default function DashboardClient() {
   const commodityIdx = indices.filter((i) => COMMODITY_IDS.includes(i.id));
   const usdInr = indices.find((i) => i.id === "USDINR")?.price ?? 83;
 
+  // Runtime MCX anchor prices (broker-grade LTPs posted by ops).
+  // /api/mcx-anchors is read-only public; POST is gated by ADMIN_API_KEY.
+  const [mcxAnchors, setMcxAnchors] = useState<Record<string, { inr: number; usd: number }> | null>(null);
+  const [anchorsUpdatedAt, setAnchorsUpdatedAt] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await fetch("/api/mcx-anchors");
+        if (!r.ok) return;
+        const j = await r.json();
+        if (cancelled) return;
+        setMcxAnchors(j?.anchors ?? null);
+        setAnchorsUpdatedAt(j?.updatedAt ?? null);
+      } catch { /* ignore */ }
+    };
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
   /* ═══════════════════════ RENDER ═══════════════════════ */
   return (
     <div className="px-2 sm:px-3 py-2 space-y-3 sm:space-y-4 text-sm text-white">
@@ -729,17 +750,35 @@ export default function DashboardClient() {
         </div>
       </section>
 
-      {/* ━━━ COMMODITIES (MCX INR equivalent — Yahoo COMEX/NYMEX × live FX) ━━━ */}
+      {/* ━━━ COMMODITIES (Int'l reference, or MCX if anchors configured) ━━━ */}
       <section>
-        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">
-          Commodities <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• MCX equivalent @ ₹{usdInr.toFixed(2)}/USD</span>
+        <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-1">
+          Commodities
         </h2>
+        {(() => {
+          const anchoredCount = commodityIdx.filter(c => mcxAnchors?.[c.id]?.inr && mcxAnchors?.[c.id]?.usd).length;
+          const allAnchored = anchoredCount > 0 && anchoredCount === commodityIdx.length;
+          const partial = anchoredCount > 0 && !allAnchored;
+          if (allAnchored) {
+            return (
+              <div className="text-[10px] text-emerald-300/80 bg-emerald-500/10 border border-emerald-500/20 rounded-md px-2 py-1.5 mb-2 leading-snug">
+                ✅ <strong>MCX anchor-tracked prices</strong> — set {anchorsUpdatedAt ? new Date(anchorsUpdatedAt).toLocaleString("en-IN") : "recently"}. Intraday ₹ moves follow live international % change from the anchor. Still, always verify LTP on your broker.
+              </div>
+            );
+          }
+          return (
+            <div className="text-[10px] text-amber-300/80 bg-amber-500/10 border border-amber-500/20 rounded-md px-2 py-1.5 mb-2 leading-snug">
+              ⚠️ <strong>International reference prices</strong> (COMEX/NYMEX/ICE USD × live ₹{usdInr.toFixed(2)}/USD + Indian duty premium){partial ? ` — ${anchoredCount}/${commodityIdx.length} also MCX-anchored` : ""}. Actual MCX LTP differs ±1-5% due to contract basis &amp; delivery premium. <strong>Always verify on your broker</strong> before trading.
+            </div>
+          );
+        })()}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           {commodityIdx.map((idx) => {
             const usd = idx.price ?? 0;
-            const inr = usdToMcxInr(idx.id, usd, usdInr);
+            const est = usdToMcxEstimateWithAnchor(idx.id, usd, usdInr, mcxAnchors as RuntimeAnchorMap | null);
             const unit = commodityUnit(idx.id);
-            const display: IndexData = { ...idx, price: inr };
+            const display: IndexData = { ...idx, price: est.inr };
+            const badge = est.source === "mcx-anchor" ? "MCX" : "Est.";
             return (
               <IndexCardSmall
                 key={idx.id}
@@ -747,7 +786,7 @@ export default function DashboardClient() {
                 fl={flash[idx.id]}
                 currencyPrefix="₹"
                 unitLabel={unit}
-                subLabel={usd > 0 ? `$${usd.toFixed(2)}` : undefined}
+                subLabel={usd > 0 ? `${badge} · $${usd.toFixed(2)}` : badge}
                 onChartClick={() =>
                   setChartTarget({
                     symbol: idx.sym,
@@ -766,7 +805,7 @@ export default function DashboardClient() {
       </section>
 
       {/* ━━━ COMMODITY PREDICTIONS ━━━ */}
-      <CommodityPredictions commodities={commodityIdx} usdInr={usdInr} onBuyTrade={addTrade} />
+      <CommodityPredictions commodities={commodityIdx} usdInr={usdInr} mcxAnchors={mcxAnchors as RuntimeAnchorMap | null} onBuyTrade={addTrade} />
 
       {/* ━━━ INDEX OPTIONS: NIFTY / SENSEX / BANKNIFTY ━━━ */}
       <section className="relative">
@@ -1673,7 +1712,7 @@ function MyPositions({ trades, onExit, onRemove, onChartClick }: {
 // so the app never pushes a low-conviction call to retail users.
 const COMMODITY_MIN_STRENGTH = 60;
 
-function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities: IndexData[]; usdInr: number; onBuyTrade?: (t: Omit<TrackedTrade, "id" | "boughtAt" | "status">) => void }) {
+function CommodityPredictions({ commodities, usdInr, mcxAnchors, onBuyTrade }: { commodities: IndexData[]; usdInr: number; mcxAnchors?: RuntimeAnchorMap | null; onBuyTrade?: (t: Omit<TrackedTrade, "id" | "boughtAt" | "status">) => void }) {
   const withData = commodities.filter(c => c.price != null && c.change != null);
 
   // Fetch REAL technical-analysis signals from SignalEngine for every
@@ -1762,12 +1801,12 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
 
   const fmt = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   const fx = usdInr > 0 ? usdInr : 83;
-  const usdToMcx = (id: string, usd: number) => usdToMcxInr(id, usd, fx);
+  const usdToMcx = (id: string, usd: number) => usdToMcxEstimateWithAnchor(id, usd, fx, mcxAnchors ?? null).inr;
   const roundStrike = (id: string, mcxPrice: number) => roundMcxStrike(id, mcxPrice);
 
   return (
     <section>
-      <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-2">🛢️ Commodity Option Recommendations — MCX INR <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• Live USD/INR ₹{fx.toFixed(2)}</span></h2>
+      <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-2">🛢️ Commodity Option Recommendations <span className="text-[10px] font-normal text-white/40 normal-case tracking-normal">• ₹ est. @ USD/INR ₹{fx.toFixed(2)} • verify LTP on broker</span></h2>
       {!signalsLoaded && (
         <div className="text-[11px] text-white/50 mb-3">⏳ Fetching real-time technical analysis — no call will be shown until indicators confirm.</div>
       )}
@@ -1910,9 +1949,9 @@ function CommodityPredictions({ commodities, usdInr, onBuyTrade }: { commodities
         })}
       </div>
       <div className="text-[10px] text-white/50 mt-3 space-y-1 leading-relaxed">
-        <div>📡 <span className="text-white/70">Data source:</span> Yahoo Finance COMEX/NYMEX/ICE USD futures, converted to ₹ MCX equivalent using <strong>live USD/INR + Indian import-duty &amp; GST premium</strong> (GOLD ~{mcxPremiumPct("GOLD").toFixed(0)}%, SILVER ~{mcxPremiumPct("SILVER").toFixed(0)}%, COPPER ~{mcxPremiumPct("COPPER").toFixed(0)}%; CRUDE/BRENT/NATGAS ~0%). Actual MCX LTP may vary 1-3% due to contract-month basis &amp; liquidity.</div>
+        <div>📡 <span className="text-white/70">Data source:</span> Yahoo Finance COMEX/NYMEX/ICE USD futures, converted to ₹ using live USD/INR + Indian import-duty &amp; GST premium (GOLD ~{mcxPremiumPct("GOLD").toFixed(0)}%, SILVER ~{mcxPremiumPct("SILVER").toFixed(0)}%, COPPER ~{mcxPremiumPct("COPPER").toFixed(0)}%). <strong>This is NOT a live MCX feed</strong> — actual MCX contracts trade with ±1-5% basis due to contract-month, delivery premium, and liquidity. For broker-grade accuracy, operators can set <code>NEXT_PUBLIC_MCX_*_ANCHOR</code> env vars (see <code>lib/commodity.ts</code>).</div>
         <div>🎯 <span className="text-white/70">Method:</span> SignalEngine with today&apos;s live bar injected (EMA 9/21/50/200, RSI-14, MACD, Bollinger, ADX, SuperTrend, VWAP, OBV, Pivot / Fib / swing S&amp;R, candle patterns) + trend-aware counter-trend veto. Calls published only when confidence ≥ {COMMODITY_MIN_STRENGTH}%.</div>
-        <div>⚠️ <span className="text-white/70">Disclaimer:</span> Educational / informational content. Not investment advice. Option premiums shown are approximate ATM estimates — verify LTP, IV &amp; expiry on your broker before any trade. Derivatives involve substantial risk of loss.</div>
+        <div>⚠️ <span className="text-white/70">Disclaimer:</span> Educational / informational content. <strong>Not investment advice</strong>. Option premiums shown are approximate ATM estimates — verify LTP, IV &amp; expiry on your broker before any trade. Derivatives involve substantial risk of loss.</div>
       </div>
     </section>
   );
