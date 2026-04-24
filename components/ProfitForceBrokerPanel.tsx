@@ -69,6 +69,22 @@ export default function ProfitForceBrokerPanel({ prefillSymbol }: { prefillSymbo
 
   useEffect(() => { load(); const t = setInterval(load, 15_000); return () => clearInterval(t); }, [load]);
 
+  // Listen for trade events dispatched by signal cards elsewhere in the app.
+  // Any component can trigger:
+  //   window.dispatchEvent(new CustomEvent('pf:trade', { detail: { symbol, side, qty, sl, target, type, limitPrice } }))
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as Partial<TradeForm> | undefined;
+      if (!detail) return;
+      setTradeDefaults(detail);
+      setTradeOpen(true);
+      // Scroll the panel into view so the modal feels anchored
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+    };
+    window.addEventListener("pf:trade", handler);
+    return () => window.removeEventListener("pf:trade", handler);
+  }, []);
+
   const cancelPending = async (id: string) => {
     await fetch(`/api/broker/profitforce/order?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     load();

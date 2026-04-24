@@ -354,6 +354,22 @@ export default function DashboardClient() {
       const newTrade: TrackedTrade = { ...trade, id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, boughtAt: new Date().toISOString(), status: "OPEN" };
       saveTrades([newTrade, ...trackedTrades]);
       setToast({ msg: `✅ Order placed: ${trade.name} ${trade.type} ${trade.strike}`, type: "success" });
+
+      // Also surface the broker modal prefilled with the signal's bracket
+      // (SL + first target). User can confirm to place on the in-app
+      // ProfitForce broker with a proper OCO bracket.
+      try {
+        window.dispatchEvent(new CustomEvent("pf:trade", {
+          detail: {
+            symbol: trade.symbol,
+            side: trade.type === "CE" ? "BUY" : "SELL",
+            qty: trade.lots ?? 1,
+            type: "market",
+            sl: trade.sl,
+            target: trade.t1,
+          },
+        }));
+      } catch {}
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setToast({ msg: `❌ Order failed: ${msg}`, type: "error" });

@@ -79,6 +79,51 @@ async function savePFAccount(userId: string, acct: PFAccount): Promise<void> {
   await client.users.updateUserMetadata(userId, { privateMetadata: { pfAccount: trimmed } });
 }
 
+/**
+ * Fire-and-forget persistence of a single PFOrder to the Postgres `orders`
+ * table (same schema used by the external broker adapters). Silently skipped
+ * if DATABASE_URL is not configured or the insert fails — Clerk metadata is
+ * still the source of truth for the in-app broker.
+ */
+function persistOrderToDb(userId: string, o: PFOrder): void {
+  (async () => {
+    try {
+      const db = await import('@/lib/db/index.js') as {
+        pool?: unknown;
+        insertOrder?: (o: Record<string, unknown>) => Promise<unknown>;
+        appendLedger?: (e: Record<string, unknown>) => Promise<unknown>;
+      };
+      if (!db?.pool || typeof db.insertOrder !== 'function') return;
+      await db.insertOrder({
+        id: o.id,
+        userId,
+        symbol: o.symbol,
+        qty: o.qty,
+        side: o.side,
+        type: o.type,
+        price: o.price,
+        createdAt: o.createdAt,
+        status: o.status,
+        source: 'profitforce',
+        brokerResponse: { reason: o.reason, amount: o.amount },
+      });
+      if (o.status === 'filled' && typeof db.appendLedger === 'function') {
+        await db.appendLedger({
+          id: o.id,
+          userId,
+          symbol: o.symbol,
+          qty: o.qty,
+          filledQty: o.qty,
+          fillPrice: o.price,
+          pnl: null,
+        });
+      }
+    } catch {
+      // Non-fatal: DB is optional for PF broker.
+    }
+  })();
+}
+
 export async function resetPFAccount(userId: string): Promise<PFAccount> {
   const fresh = defaultAccount();
   await savePFAccount(userId, fresh);
@@ -118,6 +163,7 @@ export async function placePFOrder(userId: string, input: PlacePFOrderInput): Pr
   if (!symbol || qty <= 0 || !Number.isFinite(price) || price <= 0) {
     const rejected: PFOrder = { ...orderBase, status: 'rejected', reason: 'Invalid symbol/qty/price' };
     acct.orders.push(rejected);
+    persistOrderToDb(userId, rejected);
     await savePFAccount(userId, acct);
     return { ok: false, order: rejected, account: acct };
   }
@@ -129,6 +175,7 @@ export async function placePFOrder(userId: string, input: PlacePFOrderInput): Pr
   if (side === 'BUY' && acct.funds < amount) {
     const rejected: PFOrder = { ...orderBase, status: 'rejected', reason: `Insufficient funds (need ₹${amount.toFixed(2)}, have ₹${acct.funds.toFixed(2)})` };
     acct.orders.push(rejected);
+    persistOrderToDb(userId, rejected);
     await savePFAccount(userId, acct);
     return { ok: false, order: rejected, account: acct };
   }
@@ -136,6 +183,7 @@ export async function placePFOrder(userId: string, input: PlacePFOrderInput): Pr
     // No short-selling in the virtual broker (keeps it simple)
     const rejected: PFOrder = { ...orderBase, status: 'rejected', reason: `Not enough shares to sell (holding ${currentQty}, selling ${qty})` };
     acct.orders.push(rejected);
+    persistOrderToDb(userId, rejected);
     await savePFAccount(userId, acct);
     return { ok: false, order: rejected, account: acct };
   }
@@ -173,6 +221,7 @@ export async function placePFOrder(userId: string, input: PlacePFOrderInput): Pr
 
   const filled: PFOrder = { ...orderBase, status: 'filled' };
   acct.orders.push(filled);
+  persistOrderToDb(userId, filled);
   await savePFAccount(userId, acct);
   return { ok: true, order: filled, account: acct };
 }
@@ -306,11 +355,13 @@ export async function processPendingAgainstQuotes(
     if (p.side === 'BUY' && acct.funds < amount) {
       const rej: PFOrder = { id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, price: fillPrice, amount, type: 'limit', status: 'rejected', reason: 'Insufficient funds at trigger', createdAt: new Date().toISOString() };
       acct.orders.push(rej);
+      persistOrderToDb(userId, rej);
       continue;
     }
     if (p.side === 'SELL' && currentQty < p.qty) {
       const rej: PFOrder = { id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, price: fillPrice, amount, type: 'limit', status: 'rejected', reason: 'Not enough shares at trigger', createdAt: new Date().toISOString() };
       acct.orders.push(rej);
+      persistOrderToDb(userId, rej);
       continue;
     }
 
@@ -369,6 +420,7 @@ export async function processPendingAgainstQuotes(
       status: 'filled', createdAt: new Date().toISOString(),
     };
     acct.orders.push(ord);
+    persistOrderToDb(userId, ord);
     filled.push(ord);
   }
 

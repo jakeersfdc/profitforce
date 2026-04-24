@@ -17,5 +17,11 @@
       "source": "/ml-api/:path*",
       "destination": "https://ml-api.profitforce.app/:path*"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/broker/profitforce/cron",
+      "schedule": "*/2 * * * *"
+    }
   ]
 }
