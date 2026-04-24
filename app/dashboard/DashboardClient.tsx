@@ -6,6 +6,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
 import { SebiSignalNote } from "@/components/SebiCompliance";
 import { usdToMcxEstimateWithAnchor, commodityUnit, roundMcxStrike, mcxPremiumPct, type RuntimeAnchorMap } from "@/lib/commodity";
+import ProfitForceBrokerPanel from "@/components/ProfitForceBrokerPanel";
 
 /* ─────────────────────── Types ─────────────────────── */
 type IndexData = {
@@ -806,6 +807,9 @@ export default function DashboardClient() {
 
       {/* ━━━ COMMODITY PREDICTIONS ━━━ */}
       <CommodityPredictions commodities={commodityIdx} usdInr={usdInr} mcxAnchors={mcxAnchors as RuntimeAnchorMap | null} onBuyTrade={addTrade} />
+
+      {/* ━━━ PROFITFORCE BROKER (in-house virtual broker) ━━━ */}
+      <ProfitForceBrokerPanel />
 
       {/* ━━━ INDEX OPTIONS: NIFTY / SENSEX / BANKNIFTY ━━━ */}
       <section className="relative">

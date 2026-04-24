@@ -25,17 +25,31 @@ export type PFOrder = {
   createdAt: string;
 };
 
+export type PFPendingOrder = {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  qty: number;
+  type: 'limit' | 'stop' | 'stoplimit';
+  limitPrice?: number;   // price at which a limit order executes
+  stopPrice?: number;    // trigger for stop / stop-limit orders
+  bracket?: { sl?: number; target?: number; parentId?: string };
+  createdAt: string;
+  status: 'pending';
+};
+
 export type PFAccount = {
   funds: number;         // cash balance in INR (default 1,000,000 virtual)
   positions: Record<string, PFPosition>;
-  orders: PFOrder[];     // last N orders (ring-buffer to keep metadata small)
+  orders: PFOrder[];     // last N filled/rejected orders (ring-buffer)
+  pending?: PFPendingOrder[];  // open/working orders
 };
 
 const DEFAULT_FUNDS = 1_000_000; // ₹10 lakh virtual starting capital
 const MAX_ORDER_HISTORY = 200;
 
 function defaultAccount(): PFAccount {
-  return { funds: DEFAULT_FUNDS, positions: {}, orders: [] };
+  return { funds: DEFAULT_FUNDS, positions: {}, orders: [], pending: [] };
 }
 
 export async function getPFAccount(userId: string): Promise<PFAccount> {
@@ -50,6 +64,7 @@ export async function getPFAccount(userId: string): Promise<PFAccount> {
       funds: typeof acct.funds === 'number' ? acct.funds : DEFAULT_FUNDS,
       positions: acct.positions || {},
       orders: Array.isArray(acct.orders) ? acct.orders : [],
+      pending: Array.isArray(acct.pending) ? acct.pending : [],
     };
   } catch (e) {
     console.error('getPFAccount error:', e);
@@ -160,4 +175,257 @@ export async function placePFOrder(userId: string, input: PlacePFOrderInput): Pr
   acct.orders.push(filled);
   await savePFAccount(userId, acct);
   return { ok: true, order: filled, account: acct };
+}
+
+// ============================================================================
+// LIMIT / STOP / BRACKET ORDERS
+// ============================================================================
+
+export type PlacePFPendingInput = {
+  symbol: string;
+  qty: number;
+  side: 'BUY' | 'SELL';
+  type: 'limit' | 'stop' | 'stoplimit';
+  limitPrice?: number;
+  stopPrice?: number;
+  bracket?: { sl?: number; target?: number };
+  clientOrderId?: string;
+};
+
+/**
+ * Queue a working order (limit, stop, or stop-limit). Does NOT reserve funds
+ * up-front — funds are checked again at fill time. Bracket orders store the
+ * SL/target for the UI; the child exit orders are placed automatically when
+ * the parent entry fills (see processPendingAgainstQuotes).
+ */
+export async function placePFPendingOrder(
+  userId: string,
+  input: PlacePFPendingInput,
+): Promise<{ ok: boolean; order: PFPendingOrder | PFOrder; account: PFAccount; reason?: string }> {
+  const acct = await getPFAccount(userId);
+  const symbol = String(input.symbol).toUpperCase();
+  const qty = Math.abs(Number(input.qty) || 0);
+  const side = input.side === 'SELL' ? 'SELL' : 'BUY';
+  const type = input.type;
+  const id = input.clientOrderId || `pf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  if (!symbol || qty <= 0) {
+    return { ok: false, account: acct, order: { id, symbol, side, qty, price: 0, amount: 0, type: 'limit', status: 'rejected', reason: 'Invalid symbol/qty', createdAt: new Date().toISOString() }, reason: 'Invalid symbol/qty' };
+  }
+  if ((type === 'limit' || type === 'stoplimit') && !(Number(input.limitPrice) > 0)) {
+    return { ok: false, account: acct, order: { id, symbol, side, qty, price: 0, amount: 0, type: 'limit', status: 'rejected', reason: 'limitPrice required', createdAt: new Date().toISOString() }, reason: 'limitPrice required' };
+  }
+  if ((type === 'stop' || type === 'stoplimit') && !(Number(input.stopPrice) > 0)) {
+    return { ok: false, account: acct, order: { id, symbol, side, qty, price: 0, amount: 0, type: 'limit', status: 'rejected', reason: 'stopPrice required', createdAt: new Date().toISOString() }, reason: 'stopPrice required' };
+  }
+
+  const pending: PFPendingOrder = {
+    id,
+    symbol,
+    side,
+    qty,
+    type,
+    limitPrice: input.limitPrice ? Number(input.limitPrice) : undefined,
+    stopPrice: input.stopPrice ? Number(input.stopPrice) : undefined,
+    bracket: input.bracket ? { sl: input.bracket.sl, target: input.bracket.target } : undefined,
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+  };
+
+  acct.pending = [...(acct.pending ?? []), pending];
+  await savePFAccount(userId, acct);
+  return { ok: true, order: pending, account: acct };
+}
+
+export async function cancelPFPendingOrder(
+  userId: string,
+  orderId: string,
+): Promise<{ ok: boolean; account: PFAccount; reason?: string }> {
+  const acct = await getPFAccount(userId);
+  const before = (acct.pending ?? []).length;
+  acct.pending = (acct.pending ?? []).filter(p => p.id !== orderId);
+  if (acct.pending.length === before) {
+    return { ok: false, account: acct, reason: 'Pending order not found' };
+  }
+  await savePFAccount(userId, acct);
+  return { ok: true, account: acct };
+}
+
+/** Decide whether a pending order should trigger given the current LTP. */
+function shouldTrigger(p: PFPendingOrder, ltp: number): { trigger: boolean; fillPrice?: number } {
+  if (!Number.isFinite(ltp) || ltp <= 0) return { trigger: false };
+  if (p.type === 'limit') {
+    // BUY limit: fill when LTP <= limit (price dropped to our bid)
+    // SELL limit: fill when LTP >= limit (price rose to our ask)
+    if (p.side === 'BUY' && p.limitPrice && ltp <= p.limitPrice) return { trigger: true, fillPrice: Math.min(ltp, p.limitPrice) };
+    if (p.side === 'SELL' && p.limitPrice && ltp >= p.limitPrice) return { trigger: true, fillPrice: Math.max(ltp, p.limitPrice) };
+    return { trigger: false };
+  }
+  if (p.type === 'stop') {
+    // SELL stop (stop-loss long): LTP <= stop → market sell at LTP
+    // BUY stop (stop-loss short / breakout buy): LTP >= stop → market buy at LTP
+    if (p.side === 'SELL' && p.stopPrice && ltp <= p.stopPrice) return { trigger: true, fillPrice: ltp };
+    if (p.side === 'BUY' && p.stopPrice && ltp >= p.stopPrice) return { trigger: true, fillPrice: ltp };
+    return { trigger: false };
+  }
+  if (p.type === 'stoplimit') {
+    // Trigger the stop, then execute as a limit if price still favourable
+    if (p.side === 'SELL' && p.stopPrice && ltp <= p.stopPrice && p.limitPrice && ltp >= p.limitPrice) return { trigger: true, fillPrice: Math.max(ltp, p.limitPrice) };
+    if (p.side === 'BUY' && p.stopPrice && ltp >= p.stopPrice && p.limitPrice && ltp <= p.limitPrice) return { trigger: true, fillPrice: Math.min(ltp, p.limitPrice) };
+    return { trigger: false };
+  }
+  return { trigger: false };
+}
+
+/**
+ * Mark-to-market + pending-order matching. Given a map of {symbol: LTP},
+ * triggers any working orders whose conditions are met and auto-places
+ * bracket children (SL + target as pending orders) when an entry fills.
+ */
+export async function processPendingAgainstQuotes(
+  userId: string,
+  quotes: Record<string, number>,
+): Promise<{ filled: PFOrder[]; account: PFAccount }> {
+  const acct = await getPFAccount(userId);
+  const pending = acct.pending ?? [];
+  const remaining: PFPendingOrder[] = [];
+  const newChildren: PFPendingOrder[] = [];
+  const filled: PFOrder[] = [];
+
+  for (const p of pending) {
+    const ltp = quotes[p.symbol];
+    const { trigger, fillPrice } = shouldTrigger(p, ltp);
+    if (!trigger || !fillPrice) { remaining.push(p); continue; }
+
+    // Apply fill inline (same logic as placePFOrder but without re-save)
+    const existing = acct.positions[p.symbol];
+    const currentQty = existing?.qty ?? 0;
+    const amount = p.qty * fillPrice;
+
+    // Fund/inventory checks
+    if (p.side === 'BUY' && acct.funds < amount) {
+      const rej: PFOrder = { id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, price: fillPrice, amount, type: 'limit', status: 'rejected', reason: 'Insufficient funds at trigger', createdAt: new Date().toISOString() };
+      acct.orders.push(rej);
+      continue;
+    }
+    if (p.side === 'SELL' && currentQty < p.qty) {
+      const rej: PFOrder = { id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, price: fillPrice, amount, type: 'limit', status: 'rejected', reason: 'Not enough shares at trigger', createdAt: new Date().toISOString() };
+      acct.orders.push(rej);
+      continue;
+    }
+
+    if (p.side === 'BUY') {
+      const newQty = currentQty + p.qty;
+      acct.positions[p.symbol] = {
+        symbol: p.symbol,
+        qty: newQty,
+        avgPrice: existing ? (existing.avgPrice * currentQty + fillPrice * p.qty) / newQty : fillPrice,
+        realizedPnl: existing?.realizedPnl ?? 0,
+        lastUpdated: new Date().toISOString(),
+      };
+      acct.funds -= amount;
+      // Entry filled → auto-queue bracket children (SL stop + target limit)
+      if (p.bracket) {
+        if (p.bracket.sl && p.bracket.sl > 0) {
+          newChildren.push({
+            id: `${p.id}_sl`, symbol: p.symbol, side: 'SELL', qty: p.qty,
+            type: 'stop', stopPrice: p.bracket.sl,
+            bracket: { parentId: p.id }, createdAt: new Date().toISOString(), status: 'pending',
+          });
+        }
+        if (p.bracket.target && p.bracket.target > 0) {
+          newChildren.push({
+            id: `${p.id}_tp`, symbol: p.symbol, side: 'SELL', qty: p.qty,
+            type: 'limit', limitPrice: p.bracket.target,
+            bracket: { parentId: p.id }, createdAt: new Date().toISOString(), status: 'pending',
+          });
+        }
+      }
+    } else {
+      // SELL exit
+      const realized = (fillPrice - (existing?.avgPrice ?? fillPrice)) * p.qty;
+      const newQty = currentQty - p.qty;
+      if (newQty === 0) {
+        delete acct.positions[p.symbol];
+      } else {
+        acct.positions[p.symbol] = {
+          ...(existing as PFPosition),
+          qty: newQty,
+          realizedPnl: (existing?.realizedPnl ?? 0) + realized,
+          lastUpdated: new Date().toISOString(),
+        };
+      }
+      acct.funds += amount;
+      // If this was a bracket child (SL or target), cancel its sibling
+      if (p.bracket?.parentId) {
+        const parentId = p.bracket.parentId;
+        acct.pending = (acct.pending ?? []).filter(q => q.bracket?.parentId !== parentId || q.id === p.id);
+      }
+    }
+
+    const ord: PFOrder = {
+      id: p.id, symbol: p.symbol, side: p.side, qty: p.qty,
+      price: fillPrice, amount, type: p.type === 'limit' ? 'limit' : 'market',
+      status: 'filled', createdAt: new Date().toISOString(),
+    };
+    acct.orders.push(ord);
+    filled.push(ord);
+  }
+
+  acct.pending = [...remaining.filter(r => !filled.some(f => f.id === r.id)), ...newChildren];
+  // Cancel any siblings that were tied to children that already filled above
+  for (const f of filled) {
+    const hitChild = newChildren.find(c => c.id === f.id);
+    if (hitChild?.bracket?.parentId) {
+      acct.pending = (acct.pending ?? []).filter(q => q.bracket?.parentId !== hitChild.bracket!.parentId || q.id === f.id);
+    }
+  }
+
+  if (filled.length > 0) await savePFAccount(userId, acct);
+  return { filled, account: acct };
+}
+
+// ============================================================================
+// MARK-TO-MARKET
+// ============================================================================
+
+export type PFEquitySnapshot = {
+  funds: number;
+  positionsValue: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  equity: number;            // funds + positionsValue
+  positions: Array<PFPosition & { ltp: number; mtm: number; unrealizedPnl: number; unrealizedPnlPct: number }>;
+};
+
+export function computeEquity(acct: PFAccount, quotes: Record<string, number>): PFEquitySnapshot {
+  let positionsValue = 0;
+  let unrealizedPnl = 0;
+  let realizedPnl = 0;
+  const positions = Object.values(acct.positions).map(pos => {
+    const ltp = quotes[pos.symbol] ?? pos.avgPrice;
+    const mtm = ltp * pos.qty;
+    const upnl = (ltp - pos.avgPrice) * pos.qty;
+    const upnlPct = pos.avgPrice > 0 ? ((ltp - pos.avgPrice) / pos.avgPrice) * 100 : 0;
+    positionsValue += mtm;
+    unrealizedPnl += upnl;
+    realizedPnl += pos.realizedPnl;
+    return { ...pos, ltp, mtm, unrealizedPnl: upnl, unrealizedPnlPct: upnlPct };
+  });
+  return {
+    funds: acct.funds,
+    positionsValue,
+    unrealizedPnl,
+    realizedPnl,
+    equity: acct.funds + positionsValue,
+    positions,
+  };
+}
+
+export async function addFundsPF(userId: string, amount: number): Promise<PFAccount> {
+  const acct = await getPFAccount(userId);
+  const n = Number(amount);
+  if (Number.isFinite(n)) acct.funds += n;
+  await savePFAccount(userId, acct);
+  return acct;
 }
