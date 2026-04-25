@@ -15,9 +15,50 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+import { warnOnceIfMisconfigured } from "@/lib/envCheck";
+
+warnOnceIfMisconfigured();
+
+const APP_ORIGIN =
+  process.env.NEXT_PUBLIC_APP_ORIGIN ?? "https://profitforce.vercel.app";
+
 export const metadata: Metadata = {
-  title: "ProfitForce Signals",
-  description: "Trading signals and watchlist — ProfitForce",
+  metadataBase: new URL(APP_ORIGIN),
+  title: {
+    default: "ProfitForce Signals — AI-driven Indian market signals",
+    template: "%s · ProfitForce",
+  },
+  description:
+    "AI-assisted trading signals, watchlists, and analytics for NSE / BSE / MCX. SEBI-registered research advisory.",
+  applicationName: "ProfitForce",
+  keywords: [
+    "NSE signals",
+    "trading signals India",
+    "AI trading",
+    "SEBI research analyst",
+    "MCX commodity signals",
+    "intraday signals",
+  ],
+  alternates: { canonical: APP_ORIGIN },
+  openGraph: {
+    type: "website",
+    url: APP_ORIGIN,
+    siteName: "ProfitForce",
+    title: "ProfitForce Signals — AI-driven Indian market signals",
+    description:
+      "AI-assisted trading signals, watchlists, and analytics for NSE / BSE / MCX.",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ProfitForce Signals",
+    description:
+      "AI-assisted trading signals, watchlists, and analytics for NSE / BSE / MCX.",
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true, "max-image-preview": "large" },
+  },
 };
 
 export default function RootLayout({

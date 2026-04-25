@@ -26,6 +26,34 @@ export async function POST(req: Request) {
   }
 
   const typ = event.type;
+
+  // Idempotency: skip if we have already processed this event id.
+  // Failures here should not block delivery; Stripe will retry on non-2xx.
+  try {
+    const idClient = getDbClient();
+    await idClient.connect();
+    try {
+      await idClient.query(
+        `CREATE TABLE IF NOT EXISTS stripe_events (
+           event_id TEXT PRIMARY KEY,
+           type TEXT NOT NULL,
+           received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      );
+      const ins = await idClient.query(
+        'INSERT INTO stripe_events (event_id, type) VALUES ($1, $2) ON CONFLICT (event_id) DO NOTHING RETURNING event_id',
+        [event.id, typ]
+      );
+      if (ins.rowCount === 0) {
+        return NextResponse.json({ received: true, duplicate: true });
+      }
+    } finally {
+      await idClient.end();
+    }
+  } catch (e) {
+    console.warn('stripe webhook idempotency check failed (continuing):', e);
+  }
+
   try {
     if (typ === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session;

@@ -7,11 +7,16 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import * as SecureStore from 'expo-secure-store';
 import axios from 'axios';
+import Constants from 'expo-constants';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // ─── Config ─────────────────────────────────────────────────────
+const extraApiOrigin =
+  (Constants.expoConfig?.extra as any)?.apiOrigin ||
+  (Constants.manifest2 as any)?.extra?.expoClient?.extra?.apiOrigin;
 const API_ORIGIN = __DEV__
   ? Platform.select({ android: 'http://10.0.2.2:3000', default: 'http://localhost:3000' })
-  : 'https://profitforce-signals.vercel.app'; // production URL
+  : (extraApiOrigin || 'https://profitforce.vercel.app');
 
 const Tab = createBottomTabNavigator();
 
@@ -337,7 +342,7 @@ function LoginScreen({ onLogin }: { onLogin: (jwt: string) => void }) {
 // ═══════════════════════════════════════════════════════════════════
 // APP ROOT
 // ═══════════════════════════════════════════════════════════════════
-export default function App() {
+function AppInner() {
   const { jwt, loading, login, logout, isLoggedIn } = useAuth();
   useDeepLink(login);
 
@@ -368,6 +373,14 @@ export default function App() {
         </Tab.Screen>
       </Tab.Navigator>
     </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
   );
 }
 

@@ -8,6 +8,8 @@
     "train:all": "node scripts/train_all.js",
     "train:schedule": "node scripts/schedule_train.js",
     "build": "next build",
+    "vercel-build": "node scripts/run_migrations.js && next build",
+    "postinstall": "node -e \"console.log('postinstall ok')\"",
     "start": "next start",
     "lint": "eslint"
   },

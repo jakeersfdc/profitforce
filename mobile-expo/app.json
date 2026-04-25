@@ -34,7 +34,8 @@
     "extra": {
       "eas": {
         "projectId": "ff047ca0-ad79-425f-8e6f-afed1f5741a5"
-      }
+      },
+      "apiOrigin": "https://profitforce.vercel.app"
     },
     "plugins": [
       [
