@@ -7,6 +7,7 @@ import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/
 import { SebiSignalNote } from "@/components/SebiCompliance";
 import { usdToMcxEstimateWithAnchor, commodityUnit, roundMcxStrike, mcxPremiumPct, type RuntimeAnchorMap } from "@/lib/commodity";
 import ProfitForceBrokerPanel from "@/components/ProfitForceBrokerPanel";
+import BrokerConnectPanel from "@/components/BrokerConnectPanel";
 
 /* ─────────────────────── Types ─────────────────────── */
 type IndexData = {
@@ -826,6 +827,12 @@ export default function DashboardClient() {
 
       {/* ━━━ PROFITFORCE BROKER (in-house virtual broker) ━━━ */}
       <ProfitForceBrokerPanel />
+
+      {/* ━━━ CONNECT REAL BROKERS (Zerodha / Upstox / Angel One / Dhan) ━━━ */}
+      <section>
+        <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">🔗 Connect Your Broker</h2>
+        <BrokerConnectPanel />
+      </section>
 
       {/* ━━━ INDEX OPTIONS: NIFTY / SENSEX / BANKNIFTY ━━━ */}
       <section className="relative">
