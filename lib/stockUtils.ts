@@ -81,6 +81,7 @@ export async function getIndexPrices() {
     { id: 'SENSEX', name: 'SENSEX', sym: '^BSESN' },
     { id: 'BANKNIFTY', name: 'BANKNIFTY', sym: '^NSEBANK' },
     { id: 'FINNIFTY', name: 'FINNIFTY', sym: 'NIFTY_FIN_SERVICE.NS' },
+    { id: 'GIFTNIFTY', name: 'GIFT NIFTY', sym: '^GNIFTY' },
     { id: 'DOWJ', name: 'DOW JONES', sym: '^DJI' },
     { id: 'SP500', name: 'S&P 500', sym: '^GSPC' },
     { id: 'NASDAQ', name: 'NASDAQ', sym: '^IXIC' },
