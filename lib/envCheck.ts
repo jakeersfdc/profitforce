@@ -38,8 +38,17 @@ const SPECS: EnvSpec[] = [
 
   // Ops
   { name: "CRON_SECRET", required: true, category: "ops", description: "Bearer token for Vercel cron protection" },
+  { name: "ENCRYPTION_KEY", required: true, category: "ops", description: "Base64 32-byte AES-256-GCM key for broker token vault" },
   { name: "ADMIN_USERS", required: false, category: "ops", description: "Comma-separated Clerk user IDs with admin access" },
   { name: "ADMIN_API_KEY", required: false, category: "ops", description: "Header x-admin-key for /api/mcx-anchors and similar" },
+
+  // Broker integrations (optional — only needed for the brokers you want to enable)
+  { name: "ZERODHA_API_KEY", required: false, category: "broker", description: "Kite Connect API key" },
+  { name: "ZERODHA_API_SECRET", required: false, category: "broker", description: "Kite Connect API secret" },
+  { name: "UPSTOX_CLIENT_ID", required: false, category: "broker", description: "Upstox v2 OAuth client id" },
+  { name: "UPSTOX_CLIENT_SECRET", required: false, category: "broker", description: "Upstox v2 OAuth client secret" },
+  { name: "ANGELONE_API_KEY", required: false, category: "broker", description: "Angel One SmartAPI key" },
+  { name: "ANGELONE_API_SECRET", required: false, category: "broker", description: "Angel One SmartAPI secret" },
 
   // Monitoring
   { name: "NEXT_PUBLIC_SENTRY_DSN", required: false, category: "monitoring", description: "Sentry DSN" },
