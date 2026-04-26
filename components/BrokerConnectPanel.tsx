@@ -57,12 +57,20 @@ export default function BrokerConnectPanel() {
   const [busy, setBusy] = useState<Provider | null>(null);
   const [manual, setManual] = useState<{ provider: Provider; fields: ManualField[]; submitUrl: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [needsAuth, setNeedsAuth] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/broker/connections", { cache: "no-store" });
+      if (r.status === 401) {
+        setNeedsAuth(true);
+        setData(null);
+        setError(null);
+        return;
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as ConnectionsPayload;
+      setNeedsAuth(false);
       setData(j);
     } catch (e) {
       setError(`Could not load connections: ${(e as Error).message}`);
@@ -159,6 +167,18 @@ export default function BrokerConnectPanel() {
     return (
       <div className="rounded-xl border border-white/10 bg-[#0a1224] p-4 text-sm text-white/60">
         Loading brokers…
+      </div>
+    );
+  }
+
+  if (needsAuth) {
+    return (
+      <div className="rounded-xl border border-white/10 bg-[#0a1224] p-4 text-sm text-white/70">
+        <h3 className="font-semibold text-white mb-1">Connect Broker</h3>
+        <p className="text-[12px]">
+          <a href="/sign-in" className="text-emerald-300 underline">Sign in</a> to connect
+          Upstox, Dhan, Zerodha, Angel One, or use ProfitForce paper trading.
+        </p>
       </div>
     );
   }
