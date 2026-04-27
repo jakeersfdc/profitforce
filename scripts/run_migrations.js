@@ -12,6 +12,12 @@ async function main() {
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
 
+  // Ensure migrations table exists before we query it.
+  await client.query(`CREATE TABLE IF NOT EXISTS migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+  )`);
+
   const migrationsDir = path.join(__dirname, '..', 'migrations');
   const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
 
