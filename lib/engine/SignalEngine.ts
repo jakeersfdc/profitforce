@@ -197,6 +197,123 @@ function fibLevels(swingHigh: number, swingLow: number) {
   };
 }
 
+/**
+ * Gann fan levels — projects 1x1 (45°), 2x1, 1x2, 4x1, 1x4 angles forward
+ * from the most recent swing pivot. Slope (price-per-bar) is anchored to
+ * recent ATR so levels scale with each instrument.
+ *
+ * Direction = "up" projects above pivot (resistance ladder), "down" below
+ * (support ladder). Returns levels at the current bar.
+ */
+function gannLevels(pivotPrice: number, barsSincePivot: number, atrValue: number, direction: "up" | "down") {
+  // 1x1 = ATR per bar; harmonic ratios for the rest.
+  const unit = Math.max(atrValue, pivotPrice * 0.0005);
+  const sign = direction === "up" ? 1 : -1;
+  const t = Math.max(1, barsSincePivot);
+  return {
+    g1x1: pivotPrice + sign * unit * t,        // 45° trend line
+    g2x1: pivotPrice + sign * unit * t * 2,    // steep
+    g4x1: pivotPrice + sign * unit * t * 4,    // very steep
+    g1x2: pivotPrice + sign * unit * t * 0.5,  // shallow
+    g1x4: pivotPrice + sign * unit * t * 0.25, // very shallow
+  };
+}
+
+/** Gann square-of-9 nearest support / resistance from a price (square ladder). */
+function gannSquare9(price: number) {
+  const root = Math.sqrt(price);
+  const lower = Math.floor(root);
+  const upper = Math.ceil(root);
+  // Harmonic angles around the square (45° increments)
+  const stepDown = lower * lower;
+  const stepUp = upper * upper;
+  const harmonicDown = Math.pow(lower + 0.125, 2);  // 45° below
+  const harmonicUp = Math.pow(upper - 0.125, 2);    // 45° above (closer)
+  return {
+    sqSupport: Math.min(stepDown, harmonicDown),
+    sqResistance: Math.max(stepUp, harmonicUp),
+  };
+}
+
+/**
+ * Candlestick pattern detector — runs on the last 3 bars and returns named
+ * bullish / bearish reversal patterns. We only flag patterns that appear on
+ * the most recent close (the "actionable" bar).
+ */
+type CandlePattern = { name: string; bias: "bull" | "bear"; weight: number };
+
+function detectCandlePatterns(opens: number[], highs: number[], lows: number[], closes: number[]): CandlePattern[] {
+  const out: CandlePattern[] = [];
+  const n = closes.length;
+  if (n < 3) return out;
+
+  const o0 = opens[n - 1], c0 = closes[n - 1], h0 = highs[n - 1], l0 = lows[n - 1];
+  const o1 = opens[n - 2], c1 = closes[n - 2], h1 = highs[n - 2], l1 = lows[n - 2];
+  const o2 = opens[n - 3], c2 = closes[n - 3];
+  const body0 = Math.abs(c0 - o0);
+  const range0 = Math.max(h0 - l0, 1e-9);
+  const upper0 = h0 - Math.max(o0, c0);
+  const lower0 = Math.min(o0, c0) - l0;
+  const body1 = Math.abs(c1 - o1);
+  const body2 = Math.abs(c2 - o2);
+  const isGreen = (o: number, c: number) => c > o;
+  const isRed = (o: number, c: number) => c < o;
+
+  // Hammer: small body at top, long lower wick (>=2x body), small upper wick
+  if (body0 / range0 < 0.35 && lower0 >= 2 * body0 && upper0 <= body0 * 0.6 && c0 >= o0) {
+    out.push({ name: "Hammer", bias: "bull", weight: 2 });
+  }
+  // Shooting star: small body at bottom, long upper wick
+  if (body0 / range0 < 0.35 && upper0 >= 2 * body0 && lower0 <= body0 * 0.6 && c0 <= o0) {
+    out.push({ name: "Shooting star", bias: "bear", weight: 2 });
+  }
+  // Doji: very small body relative to range (indecision — bias depends on prior bar)
+  if (body0 / range0 < 0.1) {
+    if (isRed(o1, c1)) out.push({ name: "Doji after down", bias: "bull", weight: 1 });
+    else if (isGreen(o1, c1)) out.push({ name: "Doji after up", bias: "bear", weight: 1 });
+  }
+  // Bullish engulfing
+  if (isRed(o1, c1) && isGreen(o0, c0) && o0 <= c1 && c0 >= o1 && body0 > body1) {
+    out.push({ name: "Bullish engulfing", bias: "bull", weight: 3 });
+  }
+  // Bearish engulfing
+  if (isGreen(o1, c1) && isRed(o0, c0) && o0 >= c1 && c0 <= o1 && body0 > body1) {
+    out.push({ name: "Bearish engulfing", bias: "bear", weight: 3 });
+  }
+  // Bullish harami: large red candle (n-2) followed by small body inside
+  if (isRed(o2, c2) && body2 > 0 && body0 < body2 * 0.5 && o0 >= c2 && c0 <= o2 && isGreen(o0, c0)) {
+    out.push({ name: "Bullish harami", bias: "bull", weight: 1 });
+  }
+  // Bearish harami
+  if (isGreen(o2, c2) && body2 > 0 && body0 < body2 * 0.5 && o0 <= c2 && c0 >= o2 && isRed(o0, c0)) {
+    out.push({ name: "Bearish harami", bias: "bear", weight: 1 });
+  }
+  // Morning star: red, small body, green covering >50% of red
+  if (isRed(o2, c2) && body1 < body2 * 0.4 && isGreen(o0, c0) && c0 >= (o2 + c2) / 2) {
+    out.push({ name: "Morning star", bias: "bull", weight: 3 });
+  }
+  // Evening star
+  if (isGreen(o2, c2) && body1 < body2 * 0.4 && isRed(o0, c0) && c0 <= (o2 + c2) / 2) {
+    out.push({ name: "Evening star", bias: "bear", weight: 3 });
+  }
+  // Piercing line: red then green opening below prior low, closing above prior midpoint
+  if (isRed(o1, c1) && isGreen(o0, c0) && o0 < l1 && c0 > (o1 + c1) / 2 && c0 < o1) {
+    out.push({ name: "Piercing line", bias: "bull", weight: 2 });
+  }
+  // Dark cloud cover
+  if (isGreen(o1, c1) && isRed(o0, c0) && o0 > h1 && c0 < (o1 + c1) / 2 && c0 > o1) {
+    out.push({ name: "Dark cloud cover", bias: "bear", weight: 2 });
+  }
+  // Three white soldiers / black crows on last 3 bars (strong continuation)
+  if (isGreen(o2, c2) && isGreen(o1, c1) && isGreen(o0, c0) && c0 > c1 && c1 > c2 && o1 > o2 && o0 > o1) {
+    out.push({ name: "Three white soldiers", bias: "bull", weight: 3 });
+  }
+  if (isRed(o2, c2) && isRed(o1, c1) && isRed(o0, c0) && c0 < c1 && c1 < c2 && o1 < o2 && o0 < o1) {
+    out.push({ name: "Three black crows", bias: "bear", weight: 3 });
+  }
+  return out;
+}
+
 /** Detect swing highs and lows (local peaks/troughs using left/right window) */
 function swingHighsLows(highs: number[], lows: number[], window = 5) {
   const swingHighs: { index: number; price: number }[] = [];
@@ -372,6 +489,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const closes = hist.map(h => Number(h.close));
   const highs = hist.map(h => Number(h.high));
   const lows = hist.map(h => Number(h.low));
+  const opens = hist.map(h => Number(h.open ?? h.close));
   const volumes = hist.map(h => Number(h.volume));
   const n = closes.length;
   const lastClose = closes[n - 1];
@@ -606,24 +724,59 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     reasons.push(`Bull close (+${(dayChangePct * 100).toFixed(2)}%)`);
   }
 
-  // 13. Candlestick reversal patterns (bullish/bearish engulfing on last bar)
-  if (n >= 2) {
-    const prevOpen = Number(hist[n - 2].open ?? prevClose);
-    const lastOpen = Number(hist[n - 1].open ?? lastClose);
-    const prevBearish = prevClose < prevOpen;
-    const prevBullish = prevClose > prevOpen;
-    const lastBullishCandle = lastClose > lastOpen;
-    const lastBearishCandle = lastClose < lastOpen;
-    // Bullish engulfing: previous red, current green engulfs previous body
-    if (prevBearish && lastBullishCandle && lastOpen <= prevClose && lastClose >= prevOpen) {
+  // 13. Candlestick reversal patterns (full detector — hammer, shooting star,
+  //     engulfing, harami, morning/evening star, piercing/dark cloud, three soldiers/crows)
+  const patterns = detectCandlePatterns(opens, highs, lows, closes);
+  for (const p of patterns) {
+    if (p.bias === "bull") bullScore += p.weight;
+    else bearScore += p.weight;
+    reasons.push(p.name);
+  }
+
+  // 14. Gann fan + Square-of-9 — anchored to most recent swing pivot.
+  //     Bullish if price holds above 1x1 ascending; bearish if breaks below.
+  const recentSwingHighs = swingHighsLows(highs.slice(-90), lows.slice(-90), 5).swingHighs;
+  const recentSwingLows = swingHighsLows(highs.slice(-90), lows.slice(-90), 5).swingLows;
+  const lastSwingHigh = recentSwingHighs[recentSwingHighs.length - 1];
+  const lastSwingLow = recentSwingLows[recentSwingLows.length - 1];
+  let gannLines: { g1x1: number; g2x1: number; g4x1: number; g1x2: number; g1x4: number } | null = null;
+  let gannDir: "up" | "down" = "up";
+  if (lastSwingLow && (!lastSwingHigh || lastSwingLow.index > lastSwingHigh.index)) {
+    // Trending up from swing low → ascending Gann fan
+    const barsSince = highs.slice(-90).length - lastSwingLow.index;
+    gannLines = gannLevels(lastSwingLow.price, barsSince, atrVal, "up");
+    gannDir = "up";
+    if (lastClose > gannLines.g1x1) {
       bullScore += 2;
-      reasons.push('Bullish engulfing');
-    }
-    // Bearish engulfing
-    if (prevBullish && lastBearishCandle && lastOpen >= prevClose && lastClose <= prevOpen) {
+      reasons.push(`Above Gann 1x1 (₹${round(gannLines.g1x1)})`);
+    } else if (lastClose < gannLines.g1x2) {
       bearScore += 2;
-      reasons.push('Bearish engulfing');
+      reasons.push(`Broke Gann 1x2 (₹${round(gannLines.g1x2)})`);
     }
+  } else if (lastSwingHigh) {
+    const barsSince = highs.slice(-90).length - lastSwingHigh.index;
+    gannLines = gannLevels(lastSwingHigh.price, barsSince, atrVal, "down");
+    gannDir = "down";
+    if (lastClose < gannLines.g1x1) {
+      bearScore += 2;
+      reasons.push(`Below Gann 1x1 (₹${round(gannLines.g1x1)})`);
+    } else if (lastClose > gannLines.g1x2) {
+      bullScore += 2;
+      reasons.push(`Reclaimed Gann 1x2 (₹${round(gannLines.g1x2)})`);
+    }
+  }
+
+  // 15. Gann Square-of-9 nearest harmonic levels
+  const sq9 = gannSquare9(lastClose);
+  const distToSq9Sup = (lastClose - sq9.sqSupport) / lastClose;
+  const distToSq9Res = (sq9.sqResistance - lastClose) / lastClose;
+  if (distToSq9Sup >= 0 && distToSq9Sup < 0.005) {
+    bullScore += 1;
+    reasons.push(`At Gann² support ₹${round(sq9.sqSupport)}`);
+  }
+  if (distToSq9Res >= 0 && distToSq9Res < 0.005) {
+    bearScore += 1;
+    reasons.push(`At Gann² resistance ₹${round(sq9.sqResistance)}`);
   }
 
   // 11. Pivot point position
@@ -783,6 +936,20 @@ export async function generateSignal(symbol: string): Promise<Signal> {
         fib236: round(fibs.fib236), fib382: round(fibs.fib382), fib500: round(fibs.fib500),
         fib618: round(fibs.fib618), fib786: round(fibs.fib786),
       },
+      candlePatterns: patterns.map(p => ({ name: p.name, bias: p.bias })),
+      gann: gannLines
+        ? {
+            direction: gannDir,
+            anchor: round(gannDir === "up" ? (lastSwingLow?.price ?? 0) : (lastSwingHigh?.price ?? 0)),
+            g1x1: round(gannLines.g1x1),
+            g2x1: round(gannLines.g2x1),
+            g4x1: round(gannLines.g4x1),
+            g1x2: round(gannLines.g1x2),
+            g1x4: round(gannLines.g1x4),
+            sqSupport: round(sq9.sqSupport),
+            sqResistance: round(sq9.sqResistance),
+          }
+        : null,
     },
     timestamp: new Date().toISOString(),
     fnoRecommendation: fnoRec,
