@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
@@ -327,6 +327,27 @@ export default function DashboardClient() {
   const [activeView, setActiveView] = useState<"signals" | "trading">("signals");
   const [tradingTab, setTradingTab] = useState<TradingTab>("watchlist");
 
+  /* ── Sidebar deep-links: switch view/tab based on URL hash ── */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const applyHash = () => {
+      const h = window.location.hash.replace("#", "").toLowerCase();
+      if (!h) return;
+      if (h === "alerts" || h === "signals") setActiveView("signals");
+      const tradingTabs: TradingTab[] = ["watchlist", "market", "orders", "portfolio"];
+      if ((tradingTabs as string[]).includes(h)) {
+        setActiveView("trading");
+        setTradingTab(h as TradingTab);
+      }
+      // Scroll to id-anchored sections (positions, brokers, alerts)
+      const el = document.getElementById(h);
+      if (el) setTimeout(() => el.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    };
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
+
   /* ── Tracked Trades (localStorage) ── */
   const [trackedTrades, setTrackedTrades] = useState<TrackedTrade[]>(() => {
     if (typeof window === "undefined") return [];
@@ -384,6 +405,59 @@ export default function DashboardClient() {
   const removeTrade = useCallback((id: string) => {
     saveTrades(trackedTrades.filter(t => t.id !== id));
   }, [trackedTrades, saveTrades]);
+
+  /* ── Live tracking: poll spot for each open trade and advance status ── */
+  const openSymbolsKey = useMemo(
+    () => Array.from(new Set(trackedTrades.filter(t => t.status === "OPEN").map(t => t.symbol))).sort().join(","),
+    [trackedTrades]
+  );
+  useEffect(() => {
+    if (!openSymbolsKey) return;
+    const symbols = openSymbolsKey.split(",").filter(Boolean);
+
+    const tick = async () => {
+      const spotBySym: Record<string, number> = {};
+      await Promise.all(symbols.map(async (sym) => {
+        try {
+          const r = await fetch(`/api/strikes?symbol=${encodeURIComponent(sym)}`, { cache: "no-store" });
+          if (!r.ok) return;
+          const j = await r.json();
+          const price = Number(j?.strikes?.price ?? 0);
+          if (price > 0) spotBySym[sym] = price;
+        } catch { /* ignore */ }
+      }));
+      if (Object.keys(spotBySym).length === 0) return;
+
+      setTrackedTrades(prev => {
+        const RANK: Record<TrackedTrade["status"], number> = { OPEN: 0, T1_HIT: 1, T2_HIT: 2, T3_HIT: 3, SL_HIT: 4, EXITED: 5 };
+        let changed = false;
+        const next = prev.map(t => {
+          if (t.status === "EXITED" || t.status === "SL_HIT") return t;
+          const spot = spotBySym[t.symbol];
+          if (!spot) return t;
+          const isCall = t.type === "CE";
+          const expDate = new Date(t.expiry);
+          const dte = Math.max(1, Math.ceil((expDate.getTime() - Date.now()) / 86_400_000));
+          const cur = estimatePremium(spot, t.strike, isCall, dte);
+          let nextStatus: TrackedTrade["status"] = t.status;
+          if (cur <= t.sl) nextStatus = "SL_HIT";
+          else if (cur >= t.t3 && RANK[t.status] < RANK.T3_HIT) nextStatus = "T3_HIT";
+          else if (cur >= t.t2 && RANK[t.status] < RANK.T2_HIT) nextStatus = "T2_HIT";
+          else if (cur >= t.t1 && RANK[t.status] < RANK.T1_HIT) nextStatus = "T1_HIT";
+          if (Math.abs((t.currentPremium ?? -1) - cur) < 0.05 && t.spotPrice === spot && nextStatus === t.status) return t;
+          changed = true;
+          return { ...t, currentPremium: cur, spotPrice: spot, status: nextStatus };
+        });
+        if (!changed) return prev;
+        try { localStorage.setItem("pf_trades", JSON.stringify(next)); } catch { /* */ }
+        return next;
+      });
+    };
+
+    void tick();
+    const interval = setInterval(tick, 15_000);
+    return () => clearInterval(interval);
+  }, [openSymbolsKey]);
 
   /* index options: auto-fetched for NIFTY, SENSEX, BANKNIFTY */
   type IndexOption = { sym: string; label: string; signal: Signal | null; strikes: StrikesData | null; loading: boolean; error: string | null };
@@ -829,7 +903,7 @@ export default function DashboardClient() {
       <ProfitForceBrokerPanel />
 
       {/* ━━━ CONNECT REAL BROKERS (Zerodha / Upstox / Angel One / Dhan) ━━━ */}
-      <section>
+      <section id="brokers">
         <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">🔗 Connect Your Broker</h2>
         <BrokerConnectPanel />
       </section>
@@ -1029,7 +1103,7 @@ export default function DashboardClient() {
         </section>
 
         {/* ── LIVE ALERTS PANEL (1/3) ── */}
-        <section className="space-y-2">
+        <section id="alerts" className="space-y-2">
           <h2 className="text-sm sm:text-base font-extrabold flex items-center gap-2 text-white">
             🔔 Live Alerts
             <span className="text-[10px] sm:text-xs text-white/50 font-normal">{alerts.length}</span>
@@ -1100,9 +1174,11 @@ export default function DashboardClient() {
       <TomorrowOutlook indices={indices} indexOptions={indexOptions} signals={signals} onBuyTrade={addTrade} />
 
       {/* ━━━ MY POSITIONS ━━━ */}
-      {trackedTrades.length > 0 && (
-        <MyPositions trades={trackedTrades} onExit={exitTrade} onRemove={removeTrade} onChartClick={(t) => setChartTarget({ symbol: t.symbol, name: t.name, entry: t.strike, sl: null, target: null, signal: t.type === "CE" ? "BUY" : "SELL", currentPrice: t.spotPrice ?? null })} />
-      )}
+      <div id="positions">
+        {trackedTrades.length > 0 && (
+          <MyPositions trades={trackedTrades} onExit={exitTrade} onRemove={removeTrade} onChartClick={(t) => setChartTarget({ symbol: t.symbol, name: t.name, entry: t.strike, sl: null, target: null, signal: t.type === "CE" ? "BUY" : "SELL", currentPrice: t.spotPrice ?? null })} />
+        )}
+      </div>
 
       {/* ━━━ SUBSCRIPTION MANAGEMENT ━━━ */}
       {false && isSignedIn && !subLoading && (

@@ -6,6 +6,8 @@ import {
   Home,
   Zap,
   Star,
+  Briefcase,
+  Link2,
   User,
   Menu,
   X,
@@ -17,6 +19,10 @@ import { usePathname } from "next/navigation";
 
 const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: Home },
+  { name: "Signals", href: "/dashboard#alerts", icon: Zap },
+  { name: "Positions", href: "/dashboard#positions", icon: Briefcase },
+  { name: "Watchlist", href: "/dashboard#watchlist", icon: Star },
+  { name: "Brokers", href: "/dashboard#brokers", icon: Link2 },
   { name: "Profile", href: "/profile", icon: User },
 ];
 
