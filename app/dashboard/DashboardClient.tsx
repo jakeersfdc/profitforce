@@ -2107,17 +2107,24 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
   else if (avgIndiaChange >= 0.4 || (indiaUpCount >= 2 && avgIndiaChange > 0)) todayIndiaBias = "BULLISH";
 
   // Overall outlook — expert override takes priority.
-  // Weight: today's India price action (2x) + global cue (1x) + signals (1x).
-  // A sharp bear day (<= -0.8%) forces BEARISH regardless of signal counts.
+  // Weights scale with magnitude so a sharply bearish global cue doesn't get
+  // outvoted by a flat India close + a few oversold-RSI BUYs.
+  //   today India: 2x base, 3x if |move| >= 0.8%
+  //   global cue:  1x base, 2x if |avg| >= 0.8%, 3x if |avg| >= 1.2%
+  //   domestic signals: 1x
   const todayWeight = Math.abs(avgIndiaChange) >= 0.8 ? 3 : 2;
-  const overallBull =
-    (todayIndiaBias === "BULLISH" ? todayWeight : todayIndiaBias === "BEARISH" ? -todayWeight : 0) +
-    (globalBias === "BULLISH" ? 1 : globalBias === "BEARISH" ? -1 : 0) +
-    (domesticBias === "BULLISH" ? 1 : domesticBias === "BEARISH" ? -1 : 0);
+  const globalWeight = Math.abs(avgGlobalChange) >= 1.2 ? 3 : Math.abs(avgGlobalChange) >= 0.8 ? 2 : 1;
+  const todayScore = todayIndiaBias === "BULLISH" ? todayWeight : todayIndiaBias === "BEARISH" ? -todayWeight : 0;
+  const globalScore = globalBias === "BULLISH" ? globalWeight : globalBias === "BEARISH" ? -globalWeight : 0;
+  const domesticScore = domesticBias === "BULLISH" ? 1 : domesticBias === "BEARISH" ? -1 : 0;
+  const overallBull = todayScore + globalScore + domesticScore;
   let autoOutlook: "BULLISH" | "BEARISH" | "SIDEWAYS" = overallBull > 0 ? "BULLISH" : overallBull < 0 ? "BEARISH" : "SIDEWAYS";
-  // Hard guard: if India closed clearly bearish today, never show BULLISH in AUTO.
+  // Hard guards: extreme moves on either India or global cannot be flipped.
   if (avgIndiaChange <= -0.8 && autoOutlook === "BULLISH") autoOutlook = "BEARISH";
   if (avgIndiaChange >= 0.8 && autoOutlook === "BEARISH") autoOutlook = "BULLISH";
+  // If global is sharply bearish (>=1.2%) and India is flat (<0.4%), downgrade
+  // an otherwise-bullish AUTO read to SIDEWAYS — gap-down risk overnight.
+  if (avgGlobalChange <= -1.2 && Math.abs(avgIndiaChange) < 0.4 && autoOutlook === "BULLISH") autoOutlook = "SIDEWAYS";
   const outlook = expertBias === "AUTO" ? autoOutlook : expertBias;
   const outlookColor = outlook === "BULLISH" ? "text-green-400" : outlook === "BEARISH" ? "text-red-400" : "text-yellow-400";
   const outlookBorder = outlook === "BULLISH" ? "border-green-500/50" : outlook === "BEARISH" ? "border-red-500/50" : "border-yellow-500/50";
@@ -2178,7 +2185,11 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
             <span className="text-2xl">{outlook === "BULLISH" ? "📈" : outlook === "BEARISH" ? "📉" : "↔️"}</span>
             <div>
               <div className={`text-lg font-extrabold ${outlookColor}`}>Market Outlook: {outlook}</div>
-              <div className="text-xs text-white/50">{expertBias !== "AUTO" ? `Expert trader analysis → ${expertBias} → Buy ${expertBias === "BEARISH" ? "PE" : "CE"} options` : "Based on today's India close (weighted) + global cues + domestic signals + S/R"}</div>
+              <div className="text-xs text-white/50">
+                {expertBias !== "AUTO"
+                  ? `Expert trader analysis → ${expertBias} → Buy ${expertBias === "BEARISH" ? "PE" : "CE"} options`
+                  : `Score ${overallBull >= 0 ? "+" : ""}${overallBull} = India ${todayScore >= 0 ? "+" : ""}${todayScore} (×${todayWeight}) · Global ${globalScore >= 0 ? "+" : ""}${globalScore} (×${globalWeight}) · Signals ${domesticScore >= 0 ? "+" : ""}${domesticScore}`}
+              </div>
             </div>
           </div>
           <div className="flex gap-3 text-xs">
