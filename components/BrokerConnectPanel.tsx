@@ -121,8 +121,11 @@ export default function BrokerConnectPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
       });
-      const j = await r.json();
-      if (!r.ok || j?.ok === false) throw new Error(j?.details || j?.error || `HTTP ${r.status}`);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j?.ok === false) {
+        const detail = j?.details || j?.hint || j?.error || `HTTP ${r.status}`;
+        throw new Error(detail);
+      }
       setManual(null);
       await refresh();
     } catch (e) {
@@ -279,7 +282,8 @@ export default function BrokerConnectPanel() {
           provider={manual.provider}
           fields={manual.fields}
           busy={busy === manual.provider}
-          onCancel={() => setManual(null)}
+          error={error}
+          onCancel={() => { setManual(null); setError(null); }}
           onSubmit={submitManual}
         />
       )}
@@ -291,6 +295,7 @@ function ManualConnectModal(props: {
   provider: Provider;
   fields: ManualField[];
   busy: boolean;
+  error?: string | null;
   onCancel: () => void;
   onSubmit: (values: Record<string, string>) => void;
 }) {
@@ -305,6 +310,11 @@ function ManualConnectModal(props: {
         className="w-full max-w-sm rounded-xl border border-white/10 bg-[#0a1224] p-4 text-sm text-white"
       >
         <h4 className="font-semibold mb-3">Connect {LABELS[props.provider]}</h4>
+        {props.error && (
+          <div className="mb-3 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+            {props.error}
+          </div>
+        )}
         {props.fields.length === 0 && (
           <p className="text-white/60 text-xs mb-3">No fields required — click Connect to provision.</p>
         )}

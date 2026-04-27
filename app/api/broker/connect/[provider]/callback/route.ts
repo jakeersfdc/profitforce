@@ -48,6 +48,17 @@ async function handle(
 
   if (!clerkId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  if (!process.env.DATABASE_URL) {
+    return NextResponse.json(
+      {
+        error: "database_not_configured",
+        hint:
+          "Postgres database is not provisioned. Add DATABASE_URL in Vercel → Settings → Environment Variables (e.g. provision Neon Postgres from the Vercel Marketplace) and run migrations.",
+      },
+      { status: 503 }
+    );
+  }
+
   const origin = originFrom(req);
   let result;
   try {
