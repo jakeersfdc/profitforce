@@ -1,5 +1,15 @@
 "use server";
 
+import {
+  getStockExpiry,
+  getNseIndexWeeklyExpiry,
+  getBseIndexWeeklyExpiry,
+  getMcxExpiry,
+  isIndexSymbol as _isIndexSymbol,
+  normaliseSymbol,
+} from "./expiryUtils";
+import { isCommodityId, type CommodityId } from "./commodity";
+
 // Dynamically import and instantiate yahoo-finance2 on the server only.
 let _yfClient: any = null;
 async function getYahooClient() {
@@ -593,6 +603,28 @@ const TICK_MAP: Record<string, number> = {
   'NIFTY_FIN_SERVICE.NS': 50, '^NSMIDCP': 25, '^CNXIT': 50,
 };
 
+const INDEX_SYMBOLS = new Set([
+  '^NSEI', '^NSEBANK', '^BSESN', 'NIFTY_FIN_SERVICE.NS', '^NSMIDCP', '^CNXIT',
+]);
+function isIndexSymbol(symbol: string): boolean {
+  return INDEX_SYMBOLS.has(symbol) || _isIndexSymbol(symbol);
+}
+
+/**
+ * NSE F&O strike-interval rules for individual stocks (rupees).
+ * Calibrated against actual listed strikes (ONGC ₹5, RELIANCE ₹10,
+ * BAJFINANCE ₹100). Used only when an explicit tick is not provided.
+ */
+function stockStrikeStep(price: number): number {
+  if (price <= 50) return 2.5;
+  if (price <= 250) return 5;
+  if (price <= 500) return 5;
+  if (price <= 1000) return 10;
+  if (price <= 2500) return 20;
+  if (price <= 5000) return 50;
+  return 100;
+}
+
 // Cache for NSE option chain data (30s TTL for near-realtime)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _nseOCCache: Map<string, { ts: number; data: any }> = new Map();
@@ -731,26 +763,26 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
     }
 
     // ── Fallback: calculated strikes (for SENSEX or when NSE is unavailable) ──
-    const resolvedTick = tick ?? TICK_MAP[symbol] ?? 50;
+    const isIdx = isIndexSymbol(symbol);
+    const resolvedTick = tick ?? TICK_MAP[symbol] ?? (isIdx ? 50 : stockStrikeStep(p));
     const atm = Math.round(p / resolvedTick) * resolvedTick;
     const strikes: number[] = [];
-    for (let i = -pads; i <= pads; i++) strikes.push(atm + i * resolvedTick);
+    for (let i = -pads; i <= pads; i++) strikes.push(Math.round((atm + i * resolvedTick) * 100) / 100);
 
-    // Calculate nearest expiry. SENSEX (BSE) expires on Fridays, NSE indices on Thursdays.
-    const isBSE = symbol === '^BSESN';
-    const expiryDay = isBSE ? 4 : 2; // 4=Thursday (BSE/SENSEX), 2=Tuesday (NSE)
+    // Calculate nearest expiry via centralised resolver:
+    //  • NSE indices  → weekly Tuesday
+    //  • BSE SENSEX   → weekly Thursday
+    //  • NSE stocks   → monthly, last Tuesday of month
+    //  • MCX commod.  → fixed day-of-month
     const now = new Date();
-    const today = now.getDay(); // 0=Sun
-    let daysUntilExpiry = (expiryDay - today + 7) % 7;
-    // If today is expiry day and market is past 15:30 IST, use next week
-    if (daysUntilExpiry === 0) {
-      const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes()) + 330;
-      if (istMin > 15 * 60 + 30) daysUntilExpiry = 7;
-    }
-    const expiryDate = new Date(now);
-    expiryDate.setDate(expiryDate.getDate() + daysUntilExpiry);
-    const expiryStr = `${String(expiryDate.getDate()).padStart(2, '0')}-${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiryDate.getMonth()]}-${expiryDate.getFullYear()}`;
-    const dte = Math.max(0.5, Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+    const norm = normaliseSymbol(symbol);
+    const expInfo = isCommodityId(norm)
+      ? getMcxExpiry(norm as CommodityId, now)
+      : isIdx
+        ? (symbol === '^BSESN' ? getBseIndexWeeklyExpiry(now) : getNseIndexWeeklyExpiry(now))
+        : getStockExpiry(now);
+    const expiryStr = expInfo.iso;
+    const dte = expInfo.dte;
 
     // Build estimated live strikes with Black-Scholes premiums
     const estLiveStrikes: LiveStrike[] = strikes.map(s => {

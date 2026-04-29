@@ -887,21 +887,25 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   // ── F&O recommendation ────────────────────────────────────────────────────
   let fnoRec: FnORecommendation | null = null;
   if (signal === 'BUY' || signal === 'SELL') {
-    // Compute strike prices from entry price
-    const tick = entryPrice >= 1000 ? 50 : entryPrice >= 500 ? 25 : 10;
-    const strikesData = await suggestOptionStrikes(symbol, entryPrice, tick, 2);
+    // Let suggestOptionStrikes resolve the correct NSE strike step
+    // (price-tiered for stocks, fixed per-index otherwise) and the
+    // appropriate expiry (weekly for indices, monthly for stocks).
+    const strikesData = await suggestOptionStrikes(symbol, entryPrice, undefined, 2);
     const strikesList: number[] = (strikesData && 'strikes' in strikesData) ? strikesData.strikes as number[] : [];
-    const atm: number = (strikesData && 'atm' in strikesData) ? strikesData.atm as number : Math.round(entryPrice / tick) * tick;
+    const atm: number = (strikesData && 'atm' in strikesData) ? strikesData.atm as number : entryPrice;
     const atmIdx = strikesList.indexOf(atm) >= 0 ? strikesList.indexOf(atm) : Math.floor(strikesList.length / 2);
+    const expiryStr: string | null = (strikesData && 'expiry' in strikesData)
+      ? (strikesData.expiry as string | null)
+      : null;
 
     if (signal === 'BUY') {
       // BUY signal → recommend CALL at ATM+1 strike
       const pick = strikesList[Math.min(atmIdx + 1, strikesList.length - 1)] ?? atm;
-      fnoRec = { type: 'BUY_CALL', strike: pick, expiry: null, premium: null, delta: null, reason: `Bull signal (${reasons.slice(0, 3).join(', ')})` };
+      fnoRec = { type: 'BUY_CALL', strike: pick, expiry: expiryStr, premium: null, delta: null, reason: `Bull signal (${reasons.slice(0, 3).join(', ')})` };
     } else {
       // SELL signal → recommend PUT at ATM-1 strike
       const pick = strikesList[Math.max(atmIdx - 1, 0)] ?? atm;
-      fnoRec = { type: 'BUY_PUT', strike: pick, expiry: null, premium: null, delta: null, reason: `Bear signal (${reasons.slice(0, 3).join(', ')})` };
+      fnoRec = { type: 'BUY_PUT', strike: pick, expiry: expiryStr, premium: null, delta: null, reason: `Bear signal (${reasons.slice(0, 3).join(', ')})` };
     }
   }
 

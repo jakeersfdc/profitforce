@@ -6,6 +6,12 @@ import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
 import { SebiSignalNote } from "@/components/SebiCompliance";
 import { usdToMcxEstimateWithAnchor, commodityUnit, roundMcxStrike, mcxPremiumPct, type RuntimeAnchorMap } from "@/lib/commodity";
+import {
+  getExpiryForSymbol,
+  getNseIndexWeeklyExpiry,
+  getBseIndexWeeklyExpiry,
+} from "@/lib/expiryUtils";
+import { strikeStepFor, nearestOtmStrike, getLotSize } from "@/lib/contractSpecs";
 import ProfitForceBrokerPanel from "@/components/ProfitForceBrokerPanel";
 import BrokerConnectPanel from "@/components/BrokerConnectPanel";
 
@@ -129,32 +135,35 @@ function timeAgo(ts: string) {
   return `${Math.floor(s / 3600)}h ago`;
 }
 
-const LOT_SIZES = [1, 3, 5, 10, 20, 30, 40];
+const SUGGESTED_LOTS = [1, 3, 5, 10, 20, 30, 40] as const;
+const LOT_SIZES = [...SUGGESTED_LOTS];
 
 const MONTHS_SHORT = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
 
-/** Get next weekly expiry: Friday for BSE (SENSEX), Thursday for NSE */
-function getNextExpiry(indexName: string): { expiryStr: string; dte: number } {
-  const isBSE = indexName === "SENSEX" || indexName === "BSESN";
-  const expiryDay = isBSE ? 4 : 2; // 4=Thursday (BSE/SENSEX), 2=Tuesday (NSE)
-  const now = new Date();
-  let daysUntil = (expiryDay - now.getDay() + 7) % 7;
-  if (daysUntil === 0) {
-    const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes()) + 330;
-    if (istMin > 15 * 60 + 30) daysUntil = 7;
-  }
-  const exp = new Date(now);
-  exp.setDate(exp.getDate() + daysUntil);
-  const expiryStr = `${exp.getDate()} ${MONTHS_SHORT[exp.getMonth()]} ${exp.getFullYear()}`;
-  const dte = Math.max(0.5, Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
-  return { expiryStr, dte };
+/**
+ * Local view-helper that wraps the shared expiry resolver and adapts
+ * "short" UI ids (NIFTY/SENSEX/BANKNIFTY/RELIANCE/...) to the symbol
+ * format the resolver expects.
+ */
+function getExpiryFor(shortId: string): { expiryStr: string; dte: number } {
+  const info = getExpiryForSymbol(shortId);
+  return { expiryStr: info.display, dte: info.dte };
 }
 
-// Correct NSE/BSE strike price step sizes per index
+/** Back-compat: weekly-only resolver (NSE Tuesday / BSE Thursday). */
+function getNextExpiry(indexName: string): { expiryStr: string; dte: number } {
+  const info = isBseIndex(indexName)
+    ? getBseIndexWeeklyExpiry()
+    : getNseIndexWeeklyExpiry();
+  return { expiryStr: info.display, dte: info.dte };
+}
+
+function isBseIndex(s: string): boolean {
+  return s === "SENSEX" || s === "BSESN" || s === "BANKEX";
+}
+
 function tickForSymbol(sym: string): number {
-  if (sym.includes('NSEBANK') || sym.includes('BANK')) return 100;
-  if (sym.includes('BSESN') || sym.includes('SENSEX')) return 100;
-  return 50; // NIFTY and others default to 50
+  return strikeStepFor(sym, 0) || 50;
 }
 
 function indexShortName(label: string) {
@@ -216,10 +225,10 @@ function formatTradeCall(
   livePremium?: number | null,
   expiryOverride?: string | null,
 ) {
-  const tk = tickForSymbol(indexName);
+  const tk = strikeStepFor(indexName, spot) || tickForSymbol(indexName);
   const strikeVal = strike ?? Math.round(spot / tk) * tk;
   // Use live NSE premium when available, else Black-Scholes estimate
-  const { expiryStr } = getNextExpiry(indexName);
+  const { expiryStr } = getExpiryFor(indexName);
   const expLabel = expiryOverride ?? expiryStr;
   const premium = livePremium && livePremium > 0 ? livePremium : estimatePremium(spot, strikeVal, isCall);
   const isLiveP = livePremium != null && livePremium > 0;
@@ -227,12 +236,16 @@ function formatTradeCall(
   const lo = Math.floor(premium / 5) * 5 || Math.floor(premium);
   const hi = lo + 5;
   const optType = isCall ? "CE" : "PE";
+  const contractLot = getLotSize(indexName) ?? null;
+  const lotLine = contractLot
+    ? `LOT SIZE: ${contractLot} qty/lot · lots: ${LOT_SIZES.join("/")}`
+    : `LOTS: ${LOT_SIZES.join("/")}`;
   return {
     headline: `${indexName} ${expLabel} ${optType} ${(strikeVal ?? 0).toFixed(2)} @ ${lo}-${hi}`,
     premium,
     slLine: `STOPLOSS: ${sl}`,
     tgtLine: `TARGETS: ${t1}-${t2}-${t3}`,
-    lotLine: `LOT: ${LOT_SIZES.join("/")}`,
+    lotLine,
     sl, t1, t2, t3,
     isLivePremium: isLiveP,
     strikeVal,
@@ -240,6 +253,7 @@ function formatTradeCall(
     expLabel,
     lo,
     hi,
+    contractLot,
   };
 }
 
@@ -1132,13 +1146,13 @@ export default function DashboardClient() {
                     const sym = r.symbol ?? "";
                     const shortIdx = indexShortName(r.name ?? sym);
                     const isCall = isBuyAlert;
-                    const aTick = tickForSymbol(sym);
-                    const strikeVal = aSpot > 0 ? Math.round(aSpot / aTick) * aTick + (isBuyAlert ? aTick : -aTick) : 0;
+                    const aTick = strikeStepFor(shortIdx, aSpot);
+                    const strikeVal = aSpot > 0 ? nearestOtmStrike(aSpot, aTick, isCall) : 0;
                     const premium = aSpot > 0 ? estimatePremium(aSpot, strikeVal, isCall) : 0;
                     const opts = estimateOptionSLTarget(premium, 60);
                     const lo = Math.floor(premium / 5) * 5 || Math.floor(premium);
                     const hi = lo + 5;
-                    const { expiryStr: alertExpiry } = getNextExpiry(shortIdx);
+                    const { expiryStr: alertExpiry } = getExpiryFor(shortIdx);
                     const optLabel = isCall ? "CE" : "PE";
                     return (
                       <div key={j} className={`mb-2 last:mb-0 rounded-xl p-2 sm:p-3 border-2 font-mono text-xs sm:text-sm leading-relaxed ${
@@ -1154,7 +1168,14 @@ export default function DashboardClient() {
                             </div>
                             <div className="text-red-400 font-extrabold mt-1">🛑 STOPLOSS: {opts.sl}</div>
                             <div className="text-cyan-300 font-extrabold">🎯 TARGETS: {opts.t1}-{opts.t2}-{opts.t3}</div>
-                            <div className="text-yellow-300 font-extrabold">📦 LOT: {LOT_SIZES.join("/")}</div>
+                            {(() => {
+                              const lot = getLotSize(sym) ?? getLotSize(shortIdx);
+                              return (
+                                <div className="text-yellow-300 font-extrabold">
+                                  📦 LOT SIZE: {lot ? `${lot} qty/lot` : "—"} <span className="text-yellow-200/70 text-[10px] font-bold">· lots: {LOT_SIZES.join("/")}</span>
+                                </div>
+                              );
+                            })()}
                             <button onClick={() => addTrade({ symbol: sym, name: shortIdx, type: optLabel as "CE" | "PE", strike: strikeVal, entryPremium: premium, sl: opts.sl, t1: opts.t1, t2: opts.t2, t3: opts.t3, lots: 1, expiry: alertExpiry })} className="mt-2 w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors">📥 Buy &amp; Track</button>
                           </>
                         ) : (
@@ -1688,7 +1709,8 @@ function MyPositions({ trades, onExit, onRemove, onChartClick }: {
     const pnlPts = (refP ?? 0) - (t.entryPremium ?? 0);
     const pnlPct = (t.entryPremium ?? 0) > 0 ? (pnlPts / (t.entryPremium ?? 0)) * 100 : 0;
     const pnlColor = pnlPts >= 0 ? "text-green-400" : "text-red-400";
-    const lotSize = 15; // default lot size
+    // Real NSE/MCX contract lot size; falls back to 1 if unknown
+    const lotSize = getLotSize(t.symbol) ?? getLotSize(t.name) ?? 1;
     const pnlAmount = pnlPts * lotSize * t.lots;
 
     // Check if SL or targets hit
@@ -2305,7 +2327,14 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
                   <div className="mt-1.5 space-y-0.5 text-xs">
                     <div className="text-red-400 font-extrabold">🛑 STOPLOSS: {opts.sl}</div>
                     <div className="text-cyan-300 font-extrabold">🎯 TARGETS: {opts.t1}-{opts.t2}-{opts.t3}</div>
-                    <div className="text-yellow-300 font-extrabold">📦 LOT: {LOT_SIZES.join("/")}</div>
+                    {(() => {
+                      const lot = getLotSize(ip.id) ?? getLotSize(ip.name);
+                      return (
+                        <div className="text-yellow-300 font-extrabold">
+                          📦 LOT SIZE: {lot ? `${lot} qty/lot` : "—"} <span className="text-yellow-200/70 text-[10px] font-bold">· lots: {LOT_SIZES.join("/")}</span>
+                        </div>
+                      );
+                    })()}
                   </div>
                   <button onClick={() => onBuyTrade?.({ symbol: ip.id, name: ip.name, type: optType as "CE" | "PE", strike: strikeVal, entryPremium: premium, sl: opts.sl, t1: opts.t1, t2: opts.t2, t3: opts.t3, lots: 1, expiry: expiryStr })} className="mt-2 w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold transition-colors">📥 Buy &amp; Track</button>
                 </div>
