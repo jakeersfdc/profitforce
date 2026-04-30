@@ -540,13 +540,21 @@ export async function backtestWithSignalsV2(symbols = POPULAR_SYMBOLS, startDate
 export async function getHistorical(symbol: string, startDate?: string, endDate?: string, interval = '1d') {
   const yf = await getYahooClient();
   try {
-    // Ensure period1/period2 are provided in a format accepted by yahoo-finance2.
-    // IMPORTANT: yahoo-finance2's `historical` API treats period2 as EXCLUSIVE.
-    // If we pass today's date, today's bar is dropped — indicators then run on
-    // yesterday's close and feel "stale". Add +1 day so today is included.
-    const end = endDate ? new Date(endDate) : new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const start = startDate ? new Date(startDate) : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-    // convert to ISO date strings which yahoo-finance2 accepts as date'ish
+    // Yahoo deprecated the v7 download endpoint; `historical()` is unreliable.
+    // We use `chart()` which is the current API and supports intraday intervals
+    // (5m, 15m, 30m, 60m/1h, 1d, 1wk, 1mo).
+    const isIntraday = /^(\d+)(m|h)$/i.test(interval) || interval === '60m' || interval === '1h';
+
+    // Yahoo enforces lookback caps for intraday: 60d for sub-hourly, 730d for 1h.
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const defaultLookbackMs = isIntraday
+      ? (interval === '1h' || interval === '60m' ? 60 : 30) * dayMs
+      : 365 * dayMs;
+
+    const end = endDate ? new Date(endDate) : new Date(now + dayMs);
+    const start = startDate ? new Date(startDate) : new Date(now - defaultLookbackMs);
+
     const period1 = start.toISOString().slice(0, 10);
     const period2 = end.toISOString().slice(0, 10);
     const cacheKey = `${symbol}|${period1}|${period2}|${interval}`;
@@ -554,20 +562,59 @@ export async function getHistorical(symbol: string, startDate?: string, endDate?
     if (cached && Date.now() - cached.ts < HIST_CACHE_TTL) {
       return cached.data;
     }
-    const hist = await yf.historical(symbol, { period1, period2, interval });
-    if (!Array.isArray(hist)) return [];
-    const mapped = hist.map((h: any) => ({
-      date: new Date(h.date).toISOString(),
-      open: Number(h.open ?? 0),
-      high: Number(h.high ?? 0),
-      low: Number(h.low ?? 0),
-      close: Number(h.close ?? h.adjClose ?? 0),
-      volume: Number(h.volume ?? 0)
-    }));
-    try { _histCache.set(cacheKey, { ts: Date.now(), data: mapped }); } catch (e) {}
+
+    // chart() takes the same period strings; intervals must be in Yahoo's exact format.
+    const yfInterval = (() => {
+      const i = interval.toLowerCase();
+      if (i === '1h') return '60m';
+      if (i === '1day' || i === 'd') return '1d';
+      return i;
+    })();
+
+    let mapped: Array<{ date: string; open: number; high: number; low: number; close: number; volume: number }> = [];
+    try {
+      const chart = await yf.chart(symbol, { period1, period2, interval: yfInterval });
+      const quotes = Array.isArray(chart?.quotes) ? chart.quotes : [];
+      mapped = quotes
+        .filter((h: any) => h && h.close != null)
+        .map((h: any) => ({
+          date: new Date(h.date).toISOString(),
+          open: Number(h.open ?? h.close ?? 0),
+          high: Number(h.high ?? h.close ?? 0),
+          low: Number(h.low ?? h.close ?? 0),
+          close: Number(h.close ?? h.adjclose ?? 0),
+          volume: Number(h.volume ?? 0),
+        }));
+    } catch (chartErr) {
+      // chart() failed — fall through to legacy historical() for daily/weekly/monthly.
+      const cm = chartErr instanceof Error ? chartErr.message : String(chartErr);
+      if (!cm.toLowerCase().includes('no data')) {
+        console.debug('chart() failed for', symbol, cm);
+      }
+    }
+
+    // Fallback: legacy historical() (daily-only) if chart returned nothing.
+    if (mapped.length === 0 && (yfInterval === '1d' || yfInterval === '1wk' || yfInterval === '1mo')) {
+      try {
+        const hist = await yf.historical(symbol, { period1, period2, interval: yfInterval });
+        if (Array.isArray(hist)) {
+          mapped = hist.map((h: any) => ({
+            date: new Date(h.date).toISOString(),
+            open: Number(h.open ?? 0),
+            high: Number(h.high ?? 0),
+            low: Number(h.low ?? 0),
+            close: Number(h.close ?? h.adjClose ?? 0),
+            volume: Number(h.volume ?? 0),
+          }));
+        }
+      } catch {
+        /* ignore — chart() result already stands */
+      }
+    }
+
+    try { _histCache.set(cacheKey, { ts: Date.now(), data: mapped }); } catch {}
     return mapped;
   } catch (e) {
-    // Common: yahoo-finance2 may return "No data found" for delisted symbols — handle quietly
     const msg = e instanceof Error ? e.message : String(e);
     if (msg && msg.toLowerCase().includes('no data')) {
       console.debug('getHistorical: no data for', symbol);
