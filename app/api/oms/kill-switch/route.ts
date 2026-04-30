@@ -3,26 +3,26 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { setKillSwitch } from "@/lib/risk/RiskEngine";
 import { q } from "@/lib/oms/db";
+import { withOms } from "@/lib/oms/withOms";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export const GET = withOms(async () => {
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "unauthorized", switches: [] }, { status: 401 });
   const res = await q<{ id: number; clerk_id: string | null; enabled: boolean; reason: string | null; enabled_at: Date | null }>(
     `SELECT id, clerk_id, enabled, reason, enabled_at FROM oms_kill_switch WHERE id = 0 OR clerk_id = $1`,
     [userId]
   );
   return NextResponse.json({ switches: res.rows });
-}
+});
 
-export async function POST(req: Request) {
+export const POST = withOms(async (req: Request) => {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => ({})) as any;
   const enabled = !!body.enabled;
   const scope = body.scope === "global" ? "global" : "user";
-  // Only ADMIN_USER_IDS may toggle global
   if (scope === "global") {
     const admins = (process.env.ADMIN_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
     if (!admins.includes(userId)) {
@@ -36,4 +36,4 @@ export async function POST(req: Request) {
     enabledBy: userId,
   });
   return NextResponse.json({ ok: true, enabled, scope });
-}
+});

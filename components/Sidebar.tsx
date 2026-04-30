@@ -15,6 +15,7 @@ import {
   ChevronRight,
   LogOut,
   Activity,
+  FlaskConical,
 } from "lucide-react";
 import { usePathname } from "next/navigation";
 
@@ -22,6 +23,7 @@ const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: Home },
   { name: "Signals", href: "/dashboard#alerts", icon: Zap },
   { name: "OMS", href: "/dashboard/oms", icon: Activity },
+  { name: "Strategy Lab", href: "/dashboard/strategy", icon: FlaskConical },
   { name: "Positions", href: "/dashboard#positions", icon: Briefcase },
   { name: "Watchlist", href: "/dashboard#watchlist", icon: Star },
   { name: "Brokers", href: "/dashboard#brokers", icon: Link2 },

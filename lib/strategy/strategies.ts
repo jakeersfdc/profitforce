@@ -4,6 +4,7 @@
  */
 import type { Strategy } from "./Strategy";
 import { sma, ema, rsi, highest, lowest } from "./Strategy";
+import { projectGannFan, gannSquareOfNine } from "./gann";
 
 /** Classic 5/20 SMA crossover with ATR-style stop using recent low. */
 const smaCrossover: Strategy = {
@@ -94,10 +95,62 @@ const donchianBreakout: Strategy = {
   },
 };
 
+/**
+ * Gann fan strategy.
+ * Long when price closes above the ascending 1x1 fan AND square-of-9 support
+ * has held; exit when price loses the 1x2 line. Short logic mirrors for
+ * descending fans (used as exit-only here, since intraday equity shorting
+ * has special margin treatment).
+ */
+const gannFan: Strategy = {
+  id: "gann_fan",
+  name: "Gann Fan + Square-of-9",
+  description: "Trend trades aligned with the 1x1 Gann angle from the most recent swing pivot, with square-of-9 levels as hard support / resistance.",
+  warmup: 30,
+  step(ctx) {
+    const i = ctx.i;
+    if (i < 30) return { action: "HOLD" };
+    const window = ctx.bars.slice(0, i + 1);
+    const proj = projectGannFan(window, 0);
+    if (!proj) return { action: "HOLD" };
+    const last = proj.series[proj.series.length - 1];
+    if (!last) return { action: "HOLD" };
+    const close = ctx.bars[i].close;
+    const sq = gannSquareOfNine(close);
+
+    // Ascending fan (anchored to swing low): trade with the trend
+    if (proj.pivot.direction === "up") {
+      if (ctx.position.qty <= 0 && close > last.g1x1 && close > sq.support) {
+        const stop = Math.max(last.g1x4, sq.support);
+        const target = last.g2x1;
+        if (close - stop > 0) {
+          return {
+            action: "BUY",
+            stopLoss: stop,
+            target,
+            confidence: 0.62,
+            reason: `Above Gann 1x1 (₹${last.g1x1}) with sq9 support ₹${sq.support}`,
+          };
+        }
+      }
+      if (ctx.position.qty > 0 && close < last.g1x2) {
+        return { action: "EXIT", reason: `Lost Gann 1x2 (₹${last.g1x2})` };
+      }
+    } else {
+      // Descending fan: exit longs aggressively
+      if (ctx.position.qty > 0 && close < last.g1x1) {
+        return { action: "EXIT", reason: `Below descending Gann 1x1 (₹${last.g1x1})` };
+      }
+    }
+    return { action: "HOLD" };
+  },
+};
+
 export const STRATEGIES: Record<string, Strategy> = {
   [smaCrossover.id]: smaCrossover,
   [rsiMeanReversion.id]: rsiMeanReversion,
   [donchianBreakout.id]: donchianBreakout,
+  [gannFan.id]: gannFan,
 };
 
 export function getStrategy(id: string): Strategy | null {

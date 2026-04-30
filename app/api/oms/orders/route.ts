@@ -2,12 +2,13 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { q } from "@/lib/oms/db";
+import { withOms } from "@/lib/oms/withOms";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
+export const GET = withOms(async (req: Request) => {
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "unauthorized", orders: [] }, { status: 401 });
   const url = new URL(req.url);
   const limit = Math.min(200, Number(url.searchParams.get("limit") ?? 50));
   const status = url.searchParams.get("status");
@@ -28,4 +29,4 @@ export async function GET(req: Request) {
     params
   );
   return NextResponse.json({ orders: res.rows });
-}
+});

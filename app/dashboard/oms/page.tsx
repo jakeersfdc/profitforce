@@ -56,17 +56,25 @@ export default function OmsDashboard() {
     setBusy(true);
     setError(null);
     try {
+      const safeJson = async (url: string): Promise<Record<string, unknown>> => {
+        const r = await fetch(url, { cache: "no-store" });
+        const text = await r.text();
+        if (!text) return {};
+        try { return JSON.parse(text) as Record<string, unknown>; } catch { return { error: text }; }
+      };
       const [p, o, r, k] = await Promise.all([
-        fetch("/api/oms/positions").then((res) => res.json()),
-        fetch("/api/oms/orders?limit=50").then((res) => res.json()),
-        fetch("/api/oms/risk-profile").then((res) => res.json()),
-        fetch("/api/oms/kill-switch").then((res) => res.json()),
+        safeJson("/api/oms/positions"),
+        safeJson("/api/oms/orders?limit=50"),
+        safeJson("/api/oms/risk-profile"),
+        safeJson("/api/oms/kill-switch"),
       ]);
-      setPositions(p.positions ?? []);
-      setPnl(p.pnl ?? null);
-      setOrders(o.orders ?? []);
-      setProfile(r.profile ?? null);
-      setKill(k.switches ?? []);
+      setPositions((p.positions as Position[]) ?? []);
+      setPnl((p.pnl as { realized: number; unrealized: number; total: number }) ?? null);
+      setOrders((o.orders as Order[]) ?? []);
+      setProfile((r.profile as RiskProfile) ?? null);
+      setKill((k.switches as KillSwitchRow[]) ?? []);
+      const firstError = [p, o, r, k].map((x) => x.error).find(Boolean);
+      if (firstError) setError(String(firstError));
     } catch (e) {
       setError((e as Error).message);
     } finally {
