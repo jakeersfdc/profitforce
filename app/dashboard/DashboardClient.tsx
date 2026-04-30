@@ -1319,12 +1319,33 @@ function SubscriptionCard({ plan, isPro, isElite }: { plan: string; isPro: boole
 
 /* ─────────────────── Chart Modal (full-screen with Entry/SL/Target) ─────────────────── */
 
+type StrategyVerdict = {
+  id: string;
+  name: string;
+  action: "BUY" | "SELL" | "EXIT" | "HOLD";
+  stopLoss?: number;
+  target?: number;
+  confidence?: number;
+  reason?: string;
+};
+
+type GannFanSeriesPoint = { date: string; g1x1: number; g2x1: number; g4x1: number; g1x2: number; g1x4: number };
+
+type GannFanSnapshot = {
+  pivot: { index: number; date: string; price: number; direction: "up" | "down"; unit: number };
+  series: GannFanSeriesPoint[];
+  squareSupport: number;
+  squareResistance: number;
+};
+
 function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [intv, setIntv] = useState<string>("1d");
+  const [verdicts, setVerdicts] = useState<StrategyVerdict[]>([]);
+  const [gann, setGann] = useState<GannFanSnapshot | null>(null);
 
   const isBuy = String(target.signal).toUpperCase() === "BUY";
   const isSell = String(target.signal).toUpperCase() === "SELL";
@@ -1335,6 +1356,8 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
       if (!containerRef.current) return;
       setLoading(true);
       setError(null);
+      setVerdicts([]);
+      setGann(null);
       try {
         const resp = await fetch(`/api/history?symbol=${encodeURIComponent(target.symbol)}&interval=${intv}`);
         if (!resp.ok) throw new Error("Failed to fetch data");
@@ -1398,6 +1421,42 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
             axisLabelVisible: true, title: `CMP ₹${target.currentPrice.toLocaleString("en-IN")}`,
           });
         }
+
+        // Strategy snapshot + Gann fan overlay (best-effort; failure is non-fatal)
+        try {
+          const sresp = await fetch(`/api/strategy/snapshot?symbol=${encodeURIComponent(target.symbol)}&interval=${intv}`);
+          if (sresp.ok) {
+            const sjson = await sresp.json() as { verdicts?: StrategyVerdict[]; gannFan?: GannFanSnapshot | null };
+            if (mounted) {
+              setVerdicts(sjson.verdicts ?? []);
+              setGann(sjson.gannFan ?? null);
+            }
+            const fan = sjson.gannFan;
+            if (fan && fan.series && fan.series.length > 1) {
+              const fanLines: Array<{ key: keyof GannFanSeriesPoint; color: string; title: string }> = [
+                { key: "g4x1", color: "#f87171", title: "Gann 4×1" },
+                { key: "g2x1", color: "#fb923c", title: "Gann 2×1" },
+                { key: "g1x1", color: "#f97316", title: "Gann 1×1" },
+                { key: "g1x2", color: "#facc15", title: "Gann 1×2" },
+                { key: "g1x4", color: "#fde047", title: "Gann 1×4" },
+              ];
+              for (const fl of fanLines) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const ls: any = chart.addLineSeries({ color: fl.color, lineWidth: 1, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false, title: fl.title });
+                ls.setData(fan.series.map((p) => ({ time: p.date, value: Number(p[fl.key]) })));
+              }
+              // Square-of-9 horizontal levels
+              series.createPriceLine({
+                price: fan.squareSupport, color: "#10b981", lineWidth: 1, lineStyle: LineStyle.Dotted,
+                axisLabelVisible: true, title: `Sq9 S ₹${fan.squareSupport.toLocaleString("en-IN")}`,
+              });
+              series.createPriceLine({
+                price: fan.squareResistance, color: "#ef4444", lineWidth: 1, lineStyle: LineStyle.Dotted,
+                axisLabelVisible: true, title: `Sq9 R ₹${fan.squareResistance.toLocaleString("en-IN")}`,
+              });
+            }
+          }
+        } catch { /* snapshot is optional */ }
 
         chart.timeScale().fitContent();
 
@@ -1506,12 +1565,50 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
           )}
         </div>
 
+        {/* Strategy verdicts (live ensemble snapshot) */}
+        {(verdicts.length > 0 || gann) && (
+          <div className="px-4 py-2 border-t border-white/10 bg-[#06101e]">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wider text-white/40 font-bold">Strategies:</span>
+              {verdicts.length === 0 && (
+                <span className="text-[11px] text-white/40">No verdict (insufficient history)</span>
+              )}
+              {verdicts.map((v) => {
+                const tone =
+                  v.action === "BUY" ? "bg-emerald-900/60 text-emerald-300 border-emerald-700/60"
+                  : v.action === "SELL" ? "bg-rose-900/60 text-rose-300 border-rose-700/60"
+                  : v.action === "EXIT" ? "bg-amber-900/60 text-amber-300 border-amber-700/60"
+                  : "bg-white/5 text-white/50 border-white/10";
+                return (
+                  <span
+                    key={v.id}
+                    title={v.reason ?? ""}
+                    className={`px-2 py-0.5 rounded border text-[10px] font-bold ${tone}`}
+                  >
+                    {v.name}: {v.action}
+                    {v.confidence != null ? ` · ${(v.confidence * 100).toFixed(0)}%` : ""}
+                  </span>
+                );
+              })}
+              {gann && (
+                <span className="ml-auto text-[10px] text-white/50 font-mono">
+                  Gann pivot {gann.pivot.direction === "up" ? "↑" : "↓"} ₹{gann.pivot.price} ({gann.pivot.date}) · 1×1 ₹{gann.pivot.unit}/bar
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Footer legend */}
         <div className="flex items-center justify-center gap-6 px-4 py-2 border-t border-white/10 text-[10px]">
           <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-green-400 inline-block" /> Entry</span>
           <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-red-400 inline-block" /> Stop Loss</span>
           <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-cyan-400 inline-block" /> Target</span>
           <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-white/40 inline-block border-t border-dotted border-white/40" /> CMP</span>
+          <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-orange-500 inline-block" /> Gann 1×1</span>
+          <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-yellow-300 inline-block" /> Gann 1×4 / 4×1</span>
+          <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-emerald-500 inline-block border-t border-dotted border-emerald-500" /> Sq9 S</span>
+          <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-red-500 inline-block border-t border-dotted border-red-500" /> Sq9 R</span>
           <span className="text-white/30">Press ESC to close</span>
         </div>
       </div>
