@@ -353,8 +353,13 @@ export default function DashboardClient() {
       } catch { setView("overview"); }
     };
     read();
+    // Sidebar patches history.pushState to dispatch 'pf:locationchange' on client-side <Link> nav
     window.addEventListener("popstate", read);
-    return () => window.removeEventListener("popstate", read);
+    window.addEventListener("pf:locationchange", read);
+    return () => {
+      window.removeEventListener("popstate", read);
+      window.removeEventListener("pf:locationchange", read);
+    };
   }, []);
   const SHOW: Record<string, Set<string>> = useMemo(() => ({
     overview:    new Set(["india","global","commodities","commPred","pfBroker","brokers","fno","signals","alerts","outlook","positions"]),

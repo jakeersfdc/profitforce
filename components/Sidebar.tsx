@@ -93,8 +93,24 @@ export default function Sidebar() {
       try { setCurrentView(new URL(window.location.href).searchParams.get("view") ?? ""); } catch { setCurrentView(""); }
     };
     read();
+    // Patch history methods once so client-side <Link> navigations dispatch a 'pf:locationchange' event
+    const w = window as unknown as { __pfHistoryPatched?: boolean };
+    if (!w.__pfHistoryPatched) {
+      const orig = { push: history.pushState, replace: history.replaceState };
+      history.pushState = function (...args: Parameters<typeof history.pushState>) {
+        const r = orig.push.apply(this, args); window.dispatchEvent(new Event("pf:locationchange")); return r;
+      };
+      history.replaceState = function (...args: Parameters<typeof history.replaceState>) {
+        const r = orig.replace.apply(this, args); window.dispatchEvent(new Event("pf:locationchange")); return r;
+      };
+      w.__pfHistoryPatched = true;
+    }
     window.addEventListener("popstate", read);
-    return () => window.removeEventListener("popstate", read);
+    window.addEventListener("pf:locationchange", read);
+    return () => {
+      window.removeEventListener("popstate", read);
+      window.removeEventListener("pf:locationchange", read);
+    };
   }, [pathname]);
 
   const isActive = (href: string) => {
