@@ -349,16 +349,16 @@ export default function DashboardClient() {
   const view = (searchParams?.get("view") ?? "overview").toLowerCase();
   const SHOW: Record<string, Set<string>> = useMemo(() => ({
     overview:    new Set(["india","global","commodities","commPred","pfBroker","brokers","fno","signals","alerts","outlook","positions"]),
-    india:       new Set(["india","fno","outlook","signals","alerts","positions"]),
-    global:      new Set(["global","commodities","commPred","positions"]),
-    stocks:      new Set(["signals","alerts","positions"]),
+    india:       new Set(["india","global","fno","outlook","signals","alerts","positions"]),
+    global:      new Set(["india","global","commodities","commPred","positions"]),
+    stocks:      new Set(["india","global","signals","alerts","positions"]),
     indices:     new Set(["india","global","fno","outlook","positions"]),
-    fno:         new Set(["fno","outlook","positions"]),
-    commodities: new Set(["commodities","commPred","positions"]),
-    brokers:     new Set(["pfBroker","brokers","positions"]),
-    outlook:     new Set(["outlook","positions"]),
-    alerts:      new Set(["alerts","positions"]),
-    positions:   new Set(["positions"]),
+    fno:         new Set(["india","global","fno","outlook","positions"]),
+    commodities: new Set(["india","global","commodities","commPred","positions"]),
+    brokers:     new Set(["india","global","pfBroker","brokers","positions"]),
+    outlook:     new Set(["india","global","outlook","positions"]),
+    alerts:      new Set(["india","global","alerts","positions"]),
+    positions:   new Set(["india","global","positions"]),
   }), []);
   const sectionsOn = SHOW[view] ?? SHOW.overview;
   const show = useCallback((id: string) => sectionsOn.has(id), [sectionsOn]);
@@ -1251,9 +1251,20 @@ export default function DashboardClient() {
       {/* ━━━ MY POSITIONS ━━━ */}
       {show("positions") && (
       <div id="positions">
-        {trackedTrades.length > 0 && (
+        {trackedTrades.length > 0 ? (
           <MyPositions trades={trackedTrades} onExit={exitTrade} onRemove={removeTrade} onChartClick={(t) => setChartTarget({ symbol: t.symbol, name: t.name, entry: t.strike, sl: null, target: null, signal: t.type === "CE" ? "BUY" : "SELL", currentPrice: t.spotPrice ?? null })} />
-        )}
+        ) : view === "positions" ? (
+          <section className="rounded-xl border border-white/10 bg-white/[0.03] p-6 text-center">
+            <div className="text-3xl mb-2 opacity-60">💼</div>
+            <h3 className="text-white font-bold text-base">No positions yet</h3>
+            <p className="text-white/60 text-xs mt-1 mb-4">Buy &amp; track trade calls from Signals, Alerts, F&amp;O strikes, or Tomorrow&apos;s Outlook to see them here.</p>
+            <div className="flex items-center justify-center gap-2 flex-wrap">
+              <a href="/dashboard?view=fno" className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold">📈 Browse F&amp;O Strikes</a>
+              <a href="/dashboard?view=stocks" className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white text-xs font-bold">📊 Live Signals</a>
+              <a href="/dashboard?view=outlook" className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white text-xs font-bold">⚡ Tomorrow&apos;s Outlook</a>
+            </div>
+          </section>
+        ) : null}
       </div>
       )}
 
