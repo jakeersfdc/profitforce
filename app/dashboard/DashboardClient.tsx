@@ -292,7 +292,7 @@ function FnoBadge({ rec }: { rec: FnORec | null }) {
   );
 }
 
-const INDIA_IDS = ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY"];
+const INDIA_IDS = ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "GIFTNIFTY"];
 const GLOBAL_IDS = ["DOWJ", "SP500", "NASDAQ", "FTSE", "NIKKEI", "HANGSENG"];
 const COMMODITY_IDS = ["GOLD", "SILVER", "CRUDE", "BRENT", "NATGAS", "COPPER"];
 
@@ -301,6 +301,7 @@ const ALL_INDICES: IndexData[] = [
   { sym: "^BSESN", name: "SENSEX", price: null, change: null, id: "SENSEX" },
   { sym: "^NSEBANK", name: "BANK NIFTY", price: null, change: null, id: "BANKNIFTY" },
   { sym: "NIFTY_FIN_SERVICE.NS", name: "FINNIFTY", price: null, change: null, id: "FINNIFTY" },
+  { sym: "^GNIFTY", name: "GIFT NIFTY", price: null, change: null, id: "GIFTNIFTY" },
   { sym: "^DJI", name: "DOW JONES", price: null, change: null, id: "DOWJ" },
   { sym: "^GSPC", name: "S&P 500", price: null, change: null, id: "SP500" },
   { sym: "^IXIC", name: "NASDAQ", price: null, change: null, id: "NASDAQ" },
@@ -2223,7 +2224,7 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
   const [ensembleTickAt, setEnsembleTickAt] = useState<number>(0);
   // Build target list once from indices prop
   const indiaTargets = useMemo(
-    () => indices.filter(i => ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY"].includes(i.id)).map(i => ({ id: i.id, sym: i.sym, name: i.name })),
+    () => indices.filter(i => ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "GIFTNIFTY"].includes(i.id)).map(i => ({ id: i.id, sym: i.sym, name: i.name })),
     [indices]
   );
   useEffect(() => {
@@ -2256,9 +2257,48 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
       }
     };
     tick();
-    const h = setInterval(tick, 60_000);
+    const h = setInterval(tick, 30_000);
     return () => { cancelled = true; clearInterval(h); };
   }, [indiaTargets]);
+
+  // ── Direction lock per index: hold CE/PE until target/SL hit OR strong opposite consensus ──
+  type LockState = { side: "CE" | "PE"; strike: number; entry: number; sl: number; target: number; reason: string; lockedAt: number };
+  const lockRef = useRef<Record<string, LockState | null>>({});
+  const activeSide = useMemo<Record<string, LockState | null>>(() => {
+    const prev = lockRef.current;
+    const next: Record<string, LockState | null> = { ...prev };
+    for (const t of indiaTargets) {
+      const e = ensemble[t.id];
+      const opt = indexOptions.find(o => indexShortName(o.label) === t.id || o.label === t.name);
+      const live = opt?.strikes?.strikes?.liveStrikes ?? [];
+      const atmStrike = live.find(ls => ls.isATM) ?? live[0];
+      const cur = prev[t.id];
+
+      // 1. Existing lock — check exit (target/SL hit on the locked strike)
+      if (cur) {
+        const lockedStrike = live.find(ls => ls.strike === cur.strike);
+        const ltp = lockedStrike ? (cur.side === "CE" ? (lockedStrike.callLTP ?? 0) : (lockedStrike.putLTP ?? 0)) : 0;
+        if (ltp > 0 && (ltp >= cur.target || ltp <= cur.sl)) { next[t.id] = null; }
+      }
+      // 2. Strong opposite consensus → release lock
+      if (next[t.id] && e && e.total > 0) {
+        const ns = next[t.id]!;
+        const opposite = (ns.side === "CE" && e.top === "SELL") || (ns.side === "PE" && e.top === "BUY");
+        if (opposite && e.confidence >= 70) { next[t.id] = null; }
+      }
+      // 3. No lock + actionable consensus ≥ 50% → engage lock at ATM
+      if (!next[t.id] && e && e.total > 0 && atmStrike && (e.top === "BUY" || e.top === "SELL") && e.confidence >= 50) {
+        const side: "CE" | "PE" = e.top === "BUY" ? "CE" : "PE";
+        const prem = side === "CE" ? (atmStrike.callLTP ?? 0) : (atmStrike.putLTP ?? 0);
+        if (prem > 0) {
+          const opts = estimateOptionSLTarget(prem, e.confidence);
+          next[t.id] = { side, strike: atmStrike.strike, entry: prem, sl: opts.sl, target: opts.t2, reason: `${e.buys}B/${e.sells}S/${e.holds}H of ${e.total}`, lockedAt: e.ts };
+        }
+      }
+    }
+    lockRef.current = next;
+    return next;
+  }, [ensemble, indexOptions, indiaTargets]);
 
   // Compute market sentiment from global indices
   const globalIds = ["DOWJ", "SP500", "NASDAQ", "FTSE", "NIKKEI", "HANGSENG"];
@@ -2268,8 +2308,8 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
   const globalBias = globalUp > globalDown ? "BULLISH" : globalUp < globalDown ? "BEARISH" : "MIXED";
   const avgGlobalChange = globalIdx.length > 0 ? globalIdx.reduce((s, i) => s + (i.change ?? 0), 0) / globalIdx.length : 0;
 
-  // India indices
-  const indiaIds = ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY"];
+  // India indices (incl. GIFT NIFTY pre-market cue)
+  const indiaIds = ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "GIFTNIFTY"];
   const indiaIdx = indices.filter(i => indiaIds.includes(i.id) && i.price != null);
 
   // Compute tomorrow's predicted levels for each India index using signals
@@ -2440,7 +2480,7 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
           <div className="flex items-center justify-between mb-2">
             <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider">🤖 All-Strategies Consensus per Index</div>
             <div className="text-[9px] text-white/40">
-              {ensembleTickAt > 0 ? `Updated ${new Date(ensembleTickAt).toLocaleTimeString("en-IN", { hour12: false })} · refresh every 60s` : "Loading…"}
+              {ensembleTickAt > 0 ? `Updated ${new Date(ensembleTickAt).toLocaleTimeString("en-IN", { hour12: false })} · refresh every 30s` : "Loading…"}
             </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
@@ -2612,9 +2652,12 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
           </div>
         </div>
 
-        {/* Strike-by-strike trade calls (CE + PE per strike around ATM) */}
+        {/* Strike-by-strike trade calls — directional (CE OR PE), locked until target/SL/strong reversal */}
         <div>
-          <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider mb-2">📈 Strike-by-Strike Trade Calls — All Live Strikes</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider">📈 Active Trade Calls — Locked Direction per Index</div>
+            <div className="text-[9px] text-white/40">⚡ Auto-flip on target/SL hit or 70%+ opposite consensus</div>
+          </div>
           <div className="space-y-3">
             {indexOptions.filter(o => o.strikes?.strikes?.liveStrikes && o.strikes.strikes.liveStrikes.length > 0).map(o => {
               const live = o.strikes!.strikes.liveStrikes!;
@@ -2622,76 +2665,93 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
               const expiry = o.strikes!.strikes.expiry ?? "";
               const idxId = indexShortName(o.label);
               const lot = getLotSize(idxId) ?? getLotSize(o.label) ?? 0;
+              const lock = activeSide[idxId];
+              const e = ensemble[idxId];
+              // Determine display side: locked > consensus > expert override > none
+              const displaySide: "CE" | "PE" | null =
+                lock?.side ??
+                (e && e.confidence >= 50 && e.top === "BUY" ? "CE" : e && e.confidence >= 50 && e.top === "SELL" ? "PE" : null);
+              const sideColor = displaySide === "CE" ? "text-green-400 bg-green-950/30 border-green-500/40" : displaySide === "PE" ? "text-rose-400 bg-rose-950/30 border-rose-500/40" : "text-yellow-400 bg-yellow-950/20 border-yellow-500/30";
               return (
-                <div key={o.sym} className="rounded-lg border border-white/10 bg-[#06101e]/60">
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
-                    <div className="flex items-center gap-2">
+                <div key={o.sym} className={`rounded-lg border ${displaySide ? "border-white/10" : "border-yellow-500/20"} bg-[#06101e]/60`}>
+                  <div className="flex items-center justify-between flex-wrap gap-2 px-3 py-2 border-b border-white/5">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-extrabold text-white">{o.label}</span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/60 font-bold">ATM {atm}</span>
                       {expiry && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-800/60 text-purple-300 font-bold">Exp {expiry}</span>}
                       {lot > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-800/60 text-yellow-200 font-bold">Lot {lot}</span>}
+                      <span className={`text-[10px] px-2 py-0.5 rounded font-extrabold border ${sideColor}`}>
+                        {displaySide ? `🎯 ${displaySide} ONLY` : "⏸ AWAITING DIRECTION"}
+                      </span>
+                      {e && <span className="text-[9px] text-white/50">Consensus {e.top} {e.confidence}%</span>}
                     </div>
+                    {lock && (
+                      <div className="text-[10px] font-mono text-white/70">
+                        🔒 Locked {lock.side} {lock.strike} @ ₹{lock.entry.toFixed(2)} · SL ₹{lock.sl} · Tgt ₹{lock.target} · {lock.reason}
+                      </div>
+                    )}
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-[11px] font-mono">
-                      <thead>
-                        <tr className="bg-white/5 text-white/60 text-[10px]">
-                          <th className="py-1.5 px-2 text-right border-r border-white/5">CE OI</th>
-                          <th className="py-1.5 px-2 text-right text-green-400">CE LTP</th>
-                          <th className="py-1.5 px-2 text-right text-green-300/70">CE SL</th>
-                          <th className="py-1.5 px-2 text-right text-cyan-300/80">CE Target</th>
-                          <th className="py-1.5 px-2 text-center bg-white/10 text-white font-extrabold">STRIKE</th>
-                          <th className="py-1.5 px-2 text-right text-cyan-300/80">PE Target</th>
-                          <th className="py-1.5 px-2 text-right text-rose-300/70">PE SL</th>
-                          <th className="py-1.5 px-2 text-right text-rose-400">PE LTP</th>
-                          <th className="py-1.5 px-2 text-right border-l border-white/5">PE OI</th>
-                          <th className="py-1.5 px-2 text-center">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {live.map((ls) => {
-                          const isATM = ls.isATM;
-                          const callPrem = ls.callLTP ?? 0;
-                          const putPrem = ls.putLTP ?? 0;
-                          const ceOpts = callPrem > 0 ? estimateOptionSLTarget(callPrem, 60) : null;
-                          const peOpts = putPrem > 0 ? estimateOptionSLTarget(putPrem, 60) : null;
-                          return (
-                            <tr key={ls.strike} className={isATM ? "bg-amber-900/20" : "hover:bg-white/5"}>
-                              <td className="py-1.5 px-2 text-right text-white/60 border-r border-white/5">{ls.callOI ? ls.callOI.toLocaleString("en-IN") : "—"}</td>
-                              <td className="py-1.5 px-2 text-right font-bold text-green-400">{callPrem > 0 ? callPrem.toFixed(2) : "—"}</td>
-                              <td className="py-1.5 px-2 text-right text-rose-300">{ceOpts ? ceOpts.sl : "—"}</td>
-                              <td className="py-1.5 px-2 text-right text-cyan-300">{ceOpts ? `${ceOpts.t1}/${ceOpts.t2}/${ceOpts.t3}` : "—"}</td>
-                              <td className={`py-1.5 px-2 text-center font-extrabold ${isATM ? "text-amber-300 bg-amber-500/10" : "text-white"}`}>
-                                {ls.strike}{isATM && <span className="ml-1 text-[8px] px-1 rounded bg-amber-500/40">ATM</span>}
-                              </td>
-                              <td className="py-1.5 px-2 text-right text-cyan-300">{peOpts ? `${peOpts.t1}/${peOpts.t2}/${peOpts.t3}` : "—"}</td>
-                              <td className="py-1.5 px-2 text-right text-rose-300">{peOpts ? peOpts.sl : "—"}</td>
-                              <td className="py-1.5 px-2 text-right font-bold text-rose-400">{putPrem > 0 ? putPrem.toFixed(2) : "—"}</td>
-                              <td className="py-1.5 px-2 text-right text-white/60 border-l border-white/5">{ls.putOI ? ls.putOI.toLocaleString("en-IN") : "—"}</td>
-                              <td className="py-1.5 px-2 text-center">
-                                <div className="inline-flex gap-1">
-                                  {callPrem > 0 && ceOpts && (
+                  {!displaySide ? (
+                    <div className="px-3 py-4 text-center text-white/40 text-xs">⏳ No high-confidence direction yet — waiting for consensus ≥ 50% before issuing a call</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px] font-mono">
+                        <thead>
+                          <tr className="bg-white/5 text-white/60 text-[10px]">
+                            <th className="py-1.5 px-2 text-center bg-white/10 text-white font-extrabold">STRIKE</th>
+                            <th className="py-1.5 px-2 text-right">{displaySide} OI</th>
+                            <th className={`py-1.5 px-2 text-right ${displaySide === "CE" ? "text-green-400" : "text-rose-400"}`}>{displaySide} LTP</th>
+                            <th className="py-1.5 px-2 text-right text-white/60">Moneyness</th>
+                            <th className="py-1.5 px-2 text-right text-rose-300/70">SL</th>
+                            <th className="py-1.5 px-2 text-right text-cyan-300/80">Target T1/T2/T3</th>
+                            <th className="py-1.5 px-2 text-right text-white/50">R:R</th>
+                            <th className="py-1.5 px-2 text-center">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {live.map((ls) => {
+                            const isATM = ls.isATM;
+                            const prem = displaySide === "CE" ? (ls.callLTP ?? 0) : (ls.putLTP ?? 0);
+                            const oi = displaySide === "CE" ? ls.callOI : ls.putOI;
+                            const opts = prem > 0 ? estimateOptionSLTarget(prem, e?.confidence ?? 60) : null;
+                            // ITM/ATM/OTM tag
+                            let moneyness = "—";
+                            if (atm > 0) {
+                              if (isATM) moneyness = "ATM";
+                              else if (displaySide === "CE") moneyness = ls.strike < atm ? "ITM" : "OTM";
+                              else moneyness = ls.strike > atm ? "ITM" : "OTM";
+                            }
+                            const rr = opts && prem > 0 ? ((opts.t2 - prem) / Math.max(1, prem - opts.sl)).toFixed(2) : "—";
+                            const isLocked = lock && lock.side === displaySide && lock.strike === ls.strike;
+                            return (
+                              <tr key={ls.strike} className={isLocked ? "bg-emerald-900/20" : isATM ? "bg-amber-900/15" : "hover:bg-white/5"}>
+                                <td className={`py-1.5 px-2 text-center font-extrabold ${isATM ? "text-amber-300" : "text-white"}`}>
+                                  {ls.strike}
+                                  {isATM && <span className="ml-1 text-[8px] px-1 rounded bg-amber-500/40">ATM</span>}
+                                  {isLocked && <span className="ml-1 text-[8px] px-1 rounded bg-emerald-500/60 text-white">🔒</span>}
+                                </td>
+                                <td className="py-1.5 px-2 text-right text-white/60">{oi ? oi.toLocaleString("en-IN") : "—"}</td>
+                                <td className={`py-1.5 px-2 text-right font-bold ${displaySide === "CE" ? "text-green-400" : "text-rose-400"}`}>{prem > 0 ? prem.toFixed(2) : "—"}</td>
+                                <td className={`py-1.5 px-2 text-right font-bold text-[10px] ${moneyness === "ITM" ? "text-emerald-400" : moneyness === "ATM" ? "text-amber-300" : "text-white/50"}`}>{moneyness}</td>
+                                <td className="py-1.5 px-2 text-right text-rose-300">{opts ? opts.sl : "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-cyan-300">{opts ? `${opts.t1}/${opts.t2}/${opts.t3}` : "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-white/50">{rr}</td>
+                                <td className="py-1.5 px-2 text-center">
+                                  {prem > 0 && opts && (
                                     <button
-                                      onClick={() => onBuyTrade?.({ symbol: idxId, name: o.label, type: "CE", strike: ls.strike, entryPremium: callPrem, sl: ceOpts.sl, t1: ceOpts.t1, t2: ceOpts.t2, t3: ceOpts.t3, lots: 1, expiry })}
-                                      className="px-1.5 py-0.5 rounded bg-green-700 hover:bg-green-600 text-white text-[10px] font-bold"
-                                      title={`Buy ${idxId} ${ls.strike} CE @ ${callPrem}`}
-                                    >+CE</button>
+                                      onClick={() => onBuyTrade?.({ symbol: idxId, name: o.label, type: displaySide, strike: ls.strike, entryPremium: prem, sl: opts.sl, t1: opts.t1, t2: opts.t2, t3: opts.t3, lots: 1, expiry })}
+                                      className={`px-2 py-0.5 rounded text-white text-[10px] font-bold ${displaySide === "CE" ? "bg-green-700 hover:bg-green-600" : "bg-rose-700 hover:bg-rose-600"}`}
+                                      title={`Buy ${idxId} ${ls.strike} ${displaySide} @ ${prem}`}
+                                    >+{displaySide}</button>
                                   )}
-                                  {putPrem > 0 && peOpts && (
-                                    <button
-                                      onClick={() => onBuyTrade?.({ symbol: idxId, name: o.label, type: "PE", strike: ls.strike, entryPremium: putPrem, sl: peOpts.sl, t1: peOpts.t1, t2: peOpts.t2, t3: peOpts.t3, lots: 1, expiry })}
-                                      className="px-1.5 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white text-[10px] font-bold"
-                                      title={`Buy ${idxId} ${ls.strike} PE @ ${putPrem}`}
-                                    >+PE</button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               );
             })}
