@@ -2211,9 +2211,54 @@ function CommodityPredictions({ commodities, usdInr, mcxAnchors, onBuyTrade }: {
 
 type IndexOptionItem = { sym: string; label: string; signal: Signal | null; strikes: StrikesData | null; loading: boolean; error: string | null };
 
+type EnsembleVerdict = { id: string; name: string; action: string; reason?: string; confidence?: number; stopLoss?: number; target?: number };
+type EnsembleEntry = { buys: number; sells: number; holds: number; total: number; top: "BUY" | "SELL" | "HOLD"; confidence: number; verdicts: EnsembleVerdict[]; lastClose?: number; ts: number };
+
 function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indices: IndexData[]; indexOptions: IndexOptionItem[]; signals: Signal[]; onBuyTrade?: (t: Omit<TrackedTrade, "id" | "boughtAt" | "status">) => void }) {
   // Expert bias override: "AUTO" follows signals, "BEARISH" forces PE, "BULLISH" forces CE
   const [expertBias, setExpertBias] = useState<"AUTO" | "BULLISH" | "BEARISH">("AUTO");
+
+  // ── All-strategies ensemble: poll /api/strategy/snapshot for every India index ──
+  const [ensemble, setEnsemble] = useState<Record<string, EnsembleEntry>>({});
+  const [ensembleTickAt, setEnsembleTickAt] = useState<number>(0);
+  // Build target list once from indices prop
+  const indiaTargets = useMemo(
+    () => indices.filter(i => ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY"].includes(i.id)).map(i => ({ id: i.id, sym: i.sym, name: i.name })),
+    [indices]
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const next: Record<string, EnsembleEntry> = {};
+      await Promise.all(indiaTargets.map(async (t) => {
+        try {
+          const r = await fetch(`/api/strategy/snapshot?symbol=${encodeURIComponent(t.sym)}&interval=1d`, { cache: "no-store" });
+          if (!r.ok) return;
+          const j = await r.json();
+          const verdicts: EnsembleVerdict[] = Array.isArray(j?.verdicts) ? j.verdicts : [];
+          if (verdicts.length === 0) return;
+          let buys = 0, sells = 0, holds = 0;
+          for (const v of verdicts) {
+            const a = String(v.action ?? "HOLD").toUpperCase();
+            if (a === "BUY" || a === "ENTER_LONG" || a === "LONG") buys++;
+            else if (a === "SELL" || a === "ENTER_SHORT" || a === "SHORT" || a === "EXIT_LONG") sells++;
+            else holds++;
+          }
+          const total = verdicts.length;
+          const top: "BUY" | "SELL" | "HOLD" = buys > sells && buys > holds ? "BUY" : sells > buys && sells > holds ? "SELL" : "HOLD";
+          const confidence = total > 0 ? Math.round(((top === "BUY" ? buys : top === "SELL" ? sells : holds) / total) * 100) : 0;
+          next[t.id] = { buys, sells, holds, total, top, confidence, verdicts, lastClose: Number(j?.lastClose ?? 0) || undefined, ts: Date.now() };
+        } catch { /* ignore single failure */ }
+      }));
+      if (!cancelled && Object.keys(next).length > 0) {
+        setEnsemble(next);
+        setEnsembleTickAt(Date.now());
+      }
+    };
+    tick();
+    const h = setInterval(tick, 60_000);
+    return () => { cancelled = true; clearInterval(h); };
+  }, [indiaTargets]);
 
   // Compute market sentiment from global indices
   const globalIds = ["DOWJ", "SP500", "NASDAQ", "FTSE", "NIKKEI", "HANGSENG"];
@@ -2283,11 +2328,22 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
     const sig = opt?.signal;
     const price = idx.price ?? 0;
     const change = idx.change ?? 0;
-    const sigDir = String(sig?.signal ?? "HOLD").toUpperCase();
+    const liveDir = String(sig?.signal ?? "HOLD").toUpperCase();
+    const liveStrength = sig?.strength ?? 0;
+    const ens = ensemble[idx.id];
+    // Fuse: 60% all-strategies ensemble + 40% live momentum signal (when both present).
+    let sigDir = liveDir;
+    let strength = liveStrength;
+    if (ens && ens.total > 0) {
+      const ensScore = ens.top === "BUY" ? ens.confidence : ens.top === "SELL" ? -ens.confidence : 0;
+      const liveScore = liveDir === "BUY" ? liveStrength : liveDir === "SELL" ? -liveStrength : 0;
+      const fused = ensScore * 0.6 + liveScore * 0.4;
+      sigDir = fused > 15 ? "BUY" : fused < -15 ? "SELL" : "HOLD";
+      strength = Math.min(100, Math.round(Math.abs(fused)));
+    }
     const entry = Number(sig?.entryPrice ?? price);
     const sl = Number(sig?.stopLoss ?? 0);
     const tgt = Number(sig?.targetPrice ?? 0);
-    const strength = sig?.strength ?? 0;
 
     // Parse support/resistance from reason string if available
     const reason = sig?.reason ?? "";
@@ -2296,7 +2352,7 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
     const supportStr = sMatch ? sMatch[1] : "—";
     const resistanceStr = rMatch ? rMatch[1] : "—";
 
-    return { id: idx.id, name: idx.name, price, change, sigDir, entry, sl, tgt, strength, supportStr, resistanceStr };
+    return { id: idx.id, name: idx.name, price, change, sigDir, entry, sl, tgt, strength, supportStr, resistanceStr, ens };
   });
 
   return (
@@ -2379,6 +2435,83 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
           </div>
         </div>
 
+        {/* All-strategies consensus per India index (auto-refresh every 60s) */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider">🤖 All-Strategies Consensus per Index</div>
+            <div className="text-[9px] text-white/40">
+              {ensembleTickAt > 0 ? `Updated ${new Date(ensembleTickAt).toLocaleTimeString("en-IN", { hour12: false })} · refresh every 60s` : "Loading…"}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            {indiaTargets.map(t => {
+              const e = ensemble[t.id];
+              if (!e) return (
+                <div key={t.id} className="rounded-lg border border-white/10 bg-white/5 p-2 text-center">
+                  <div className="text-[10px] text-white/50 font-bold">{t.name}</div>
+                  <div className="text-[10px] text-white/30 mt-1">⏳ computing…</div>
+                </div>
+              );
+              const topColor = e.top === "BUY" ? "text-green-400 border-green-500/40 bg-green-950/20" : e.top === "SELL" ? "text-red-400 border-red-500/40 bg-red-950/20" : "text-yellow-400 border-yellow-500/40 bg-yellow-950/20";
+              return (
+                <div key={t.id} className={`rounded-lg border ${topColor} p-2`}>
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] text-white/70 font-bold truncate">{t.name}</div>
+                    <div className="text-[9px] text-white/40">{e.total} strat</div>
+                  </div>
+                  <div className={`text-base font-extrabold ${e.top === "BUY" ? "text-green-400" : e.top === "SELL" ? "text-red-400" : "text-yellow-400"}`}>
+                    {e.top === "BUY" ? "📈 BUY" : e.top === "SELL" ? "📉 SELL" : "↔ HOLD"} <span className="text-xs text-white/60">({e.confidence}%)</span>
+                  </div>
+                  <div className="mt-1 flex gap-1 text-[10px] font-mono">
+                    <span className="px-1.5 py-0.5 rounded bg-green-900/40 text-green-300 font-bold">B {e.buys}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-red-900/40 text-red-300 font-bold">S {e.sells}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-300 font-bold">H {e.holds}</span>
+                  </div>
+                  <div className="mt-1 h-1.5 w-full bg-white/5 rounded-full overflow-hidden flex">
+                    <div className="h-full bg-green-500" style={{ width: `${(e.buys / e.total) * 100}%` }} />
+                    <div className="h-full bg-yellow-500" style={{ width: `${(e.holds / e.total) * 100}%` }} />
+                    <div className="h-full bg-red-500" style={{ width: `${(e.sells / e.total) * 100}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {/* Per-strategy verdict matrix */}
+          {Object.keys(ensemble).length > 0 && (
+            <details className="mt-2 group">
+              <summary className="cursor-pointer text-[10px] text-white/50 hover:text-white/80 font-bold uppercase tracking-wider select-none">▾ Per-strategy verdicts (click to expand)</summary>
+              <div className="mt-2 overflow-x-auto rounded-lg border border-white/10">
+                <table className="w-full text-[11px] font-mono">
+                  <thead>
+                    <tr className="bg-white/5 text-white/60 text-[10px]">
+                      <th className="py-1.5 px-2 text-left">Strategy</th>
+                      {indiaTargets.map(t => (<th key={t.id} className="py-1.5 px-2 text-center">{t.id}</th>))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {(() => {
+                      // Union of all strategy ids across indices
+                      const allIds = new Map<string, string>();
+                      for (const e of Object.values(ensemble)) for (const v of e.verdicts) allIds.set(v.id, v.name);
+                      return Array.from(allIds.entries()).map(([sid, sname]) => (
+                        <tr key={sid} className="hover:bg-white/5">
+                          <td className="py-1 px-2 text-white/80 font-bold">{sname}</td>
+                          {indiaTargets.map(t => {
+                            const v = ensemble[t.id]?.verdicts.find(x => x.id === sid);
+                            const a = String(v?.action ?? "—").toUpperCase();
+                            const cls = a === "BUY" || a === "ENTER_LONG" || a === "LONG" ? "text-green-400" : a === "SELL" || a === "ENTER_SHORT" || a === "SHORT" || a === "EXIT_LONG" ? "text-red-400" : a === "HOLD" ? "text-yellow-400" : "text-white/30";
+                            return (<td key={t.id} className={`py-1 px-2 text-center font-bold ${cls}`} title={v?.reason ?? ""}>{a}</td>);
+                          })}
+                        </tr>
+                      ));
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div>
+
         {/* Index-wise predictions */}
         <div>
           <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider mb-2">Index Predictions — Key Levels for Tomorrow</div>
@@ -2388,6 +2521,7 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
                 <tr className="bg-white/5 text-white/70 border-b border-white/10">
                   <th className="py-2 px-3 text-left font-bold">Index</th>
                   <th className="py-2 px-2 text-center font-bold">Signal</th>
+                  <th className="py-2 px-2 text-center font-bold">All-Strat</th>
                   <th className="py-2 px-2 text-right font-bold">Today Close</th>
                   <th className="py-2 px-2 text-right font-bold text-green-400">Support</th>
                   <th className="py-2 px-2 text-right font-bold text-red-400">Resistance</th>
@@ -2404,6 +2538,13 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
                     <tr key={ip.id} className="hover:bg-white/5">
                       <td className="py-2 px-3 font-bold text-white">{ip.name}</td>
                       <td className="py-2 px-2 text-center"><Badge signal={ip.sigDir} /></td>
+                      <td className="py-2 px-2 text-center">
+                        {ip.ens ? (
+                          <span title={`${ip.ens.buys}B / ${ip.ens.sells}S / ${ip.ens.holds}H of ${ip.ens.total}`} className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${ip.ens.top === "BUY" ? "bg-green-900/50 text-green-300" : ip.ens.top === "SELL" ? "bg-red-900/50 text-red-300" : "bg-yellow-900/40 text-yellow-300"}`}>
+                            {ip.ens.top} {ip.ens.confidence}%
+                          </span>
+                        ) : <span className="text-white/30 text-[10px]">—</span>}
+                      </td>
                       <td className={`py-2 px-2 text-right font-mono font-bold ${up ? "text-green-400" : "text-red-400"}`}>
                         {ip.price > 0 ? ip.price.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "—"}
                       </td>
