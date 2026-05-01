@@ -167,6 +167,7 @@ function tickForSymbol(sym: string): number {
 }
 
 function indexShortName(label: string) {
+  if (label.includes("GIFT NIFTY") || label.includes("GNIFTY")) return "GIFTNIFTY";
   if (label.includes("NIFTY 50") || label.includes("NSEI")) return "NIFTY";
   if (label.includes("BANK") || label.includes("NSEBANK")) return "BANKNIFTY";
   if (label.includes("FINNIFTY") || label.includes("FIN_SERVICE")) return "FINNIFTY";
@@ -481,6 +482,7 @@ export default function DashboardClient() {
     { sym: "^BSESN", label: "SENSEX", signal: null, strikes: null, loading: true, error: null },
     { sym: "NIFTY_FIN_SERVICE.NS", label: "FINNIFTY", signal: null, strikes: null, loading: true, error: null },
     { sym: "^NSEBANK", label: "BANK NIFTY", signal: null, strikes: null, loading: true, error: null },
+    { sym: "^GNIFTY", label: "GIFT NIFTY", signal: null, strikes: null, loading: true, error: null },
   ]);
 
   /* ── Subscription status ── */
@@ -506,14 +508,16 @@ export default function DashboardClient() {
   /* ── auto-fetch index options on mount + every 30s ── */
   useEffect(() => {
     const fetchIndexStrikes = async () => {
-      const syms = ["^NSEI", "^BSESN", "NIFTY_FIN_SERVICE.NS", "^NSEBANK"];
-      const labels = ["NIFTY 50", "SENSEX", "FINNIFTY", "BANK NIFTY"];
+      const syms = ["^NSEI", "^BSESN", "NIFTY_FIN_SERVICE.NS", "^NSEBANK", "^GNIFTY"];
+      const labels = ["NIFTY 50", "SENSEX", "FINNIFTY", "BANK NIFTY", "GIFT NIFTY"];
       const results = await Promise.all(
         syms.map(async (sym, i) => {
           try {
+            // GIFT NIFTY uses NIFTY's option chain as proxy (no NSE-IX option chain in NSE India API)
+            const strikeSym = sym === "^GNIFTY" ? "^NSEI" : sym;
             const [sigRes, stRes] = await Promise.all([
               fetch(`/api/signal?symbol=${encodeURIComponent(sym)}`),
-              fetch(`/api/strikes?symbol=${encodeURIComponent(sym)}&pads=3`),
+              fetch(`/api/strikes?symbol=${encodeURIComponent(strikeSym)}&pads=3`),
             ]);
             const sigJson = sigRes.ok ? await sigRes.json() : null;
             const stJson = stRes.ok ? await stRes.json() : null;

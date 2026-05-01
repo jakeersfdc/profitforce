@@ -23,9 +23,11 @@ export async function GET(req: Request) {
     const symbol = url.searchParams.get('symbol');
     if (!symbol) return NextResponse.json({ error: 'symbol required' }, { status: 400 });
 
+    // GIFT NIFTY (^GNIFTY) is not on Yahoo — use NIFTY 50 spot as proxy for signal generation.
+    const sigSymbol = symbol === '^GNIFTY' ? '^NSEI' : symbol;
     const [signal, hist] = await Promise.all([
-      generateSignal(symbol),
-      getHistorical(symbol, undefined, undefined, '1d'),
+      generateSignal(sigSymbol),
+      getHistorical(sigSymbol, undefined, undefined, '1d'),
     ]);
     return NextResponse.json({ signal, hist, compliance: COMPLIANCE });
   } catch (e) {

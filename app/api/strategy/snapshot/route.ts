@@ -37,7 +37,10 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "symbol_required" }, { status: 400 });
     }
 
-    const hist = (await getHistorical(symbol, undefined, undefined, interval)) as HistRow[];
+    // GIFT NIFTY (^GNIFTY) is not on Yahoo — proxy to NIFTY 50 spot for strategy backtest
+    // (GIFT NIFTY closely tracks NIFTY 50 plus overnight global cue, so signal direction transfers).
+    const histSymbol = symbol === "^GNIFTY" ? "^NSEI" : symbol;
+    const hist = (await getHistorical(histSymbol, undefined, undefined, interval)) as HistRow[];
     if (!Array.isArray(hist) || hist.length < 30) {
       return NextResponse.json({
         symbol,

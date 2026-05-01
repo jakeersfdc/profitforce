@@ -111,6 +111,11 @@ export async function getIndexPrices() {
 
   const results = await Promise.all(
     indices.map(async (idx) => {
+      // GIFT NIFTY is not on Yahoo — pull from NSE India marketStatus payload
+      if (idx.id === 'GIFTNIFTY') {
+        const gn = await fetchGiftNifty();
+        return { id: idx.id, name: idx.name, sym: idx.sym, price: gn.price, change: gn.changePercent };
+      }
       const data = await fetchQuote(idx.sym);
       return {
         id: idx.id,
@@ -122,6 +127,44 @@ export async function getIndexPrices() {
     })
   );
   return results;
+}
+
+// ── GIFT NIFTY (NSE-IX) — Yahoo has no symbol; scrape NSE India marketStatus ──
+const _gnCache: { ts: number; data: { price: number; changePercent: number; expiry?: string; ts?: string } } = {
+  ts: 0,
+  data: { price: 0, changePercent: 0 },
+};
+const GN_TTL = 30 * 1000;
+async function fetchGiftNifty() {
+  if (Date.now() - _gnCache.ts < GN_TTL && _gnCache.data.price > 0) return _gnCache.data;
+  try {
+    const r = await fetch('https://www.nseindia.com/api/marketStatus', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.nseindia.com/',
+      },
+      cache: 'no-store',
+    });
+    if (!r.ok) throw new Error(`marketStatus ${r.status}`);
+    const j: any = await r.json();
+    const gn = j?.giftnifty;
+    if (!gn || !Number.isFinite(Number(gn.LASTPRICE))) throw new Error('no_giftnifty');
+    const data = {
+      price: Number(gn.LASTPRICE) || 0,
+      changePercent: Number(gn.PERCHANGE) || 0,
+      expiry: String(gn.EXPIRYDATE ?? ''),
+      ts: String(gn.TIMESTMP ?? ''),
+    };
+    _gnCache.ts = Date.now();
+    _gnCache.data = data;
+    return data;
+  } catch (e) {
+    console.error('[fetchGiftNifty]', e instanceof Error ? e.message : String(e));
+    if (_gnCache.data.price > 0) return _gnCache.data; // serve stale on failure
+    return { price: 0, changePercent: 0 };
+  }
 }
 
 export async function calculateAISignal(symbol: string) {
