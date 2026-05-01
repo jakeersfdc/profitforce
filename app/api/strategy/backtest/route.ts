@@ -28,7 +28,9 @@ export async function POST(req: Request) {
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   if (process.env.ALLOW_PUBLIC_BACKTEST !== "1") {
-    const ok = await isSubscriber(userId).catch(() => false);
+    const admins = (process.env.ADMIN_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const isAdmin = admins.includes(userId);
+    const ok = isAdmin || (await isSubscriber(userId).catch(() => false));
     if (!ok) return NextResponse.json({ error: "subscription required" }, { status: 403 });
   }
 
@@ -38,9 +40,27 @@ export async function POST(req: Request) {
   }
   const strategyId = body.strategyId ? String(body.strategyId) : "all";
 
-  const hist = await getHistorical(String(body.symbol), body.startDate, body.endDate);
-  if (!Array.isArray(hist) || hist.length < 30) {
-    return NextResponse.json({ error: "insufficient_history", count: Array.isArray(hist) ? hist.length : 0 }, { status: 400 });
+  const rawSymbol = String(body.symbol).trim().toUpperCase();
+  const symbolCandidates = buildSymbolCandidates(rawSymbol);
+
+  let hist: unknown[] = [];
+  let resolvedSymbol = rawSymbol;
+  for (const candidate of symbolCandidates) {
+    const data = await getHistorical(candidate, body.startDate, body.endDate);
+    if (Array.isArray(data) && data.length >= 30) {
+      hist = data;
+      resolvedSymbol = candidate;
+      break;
+    }
+  }
+  if (hist.length < 30) {
+    return NextResponse.json({
+      error: "insufficient_history",
+      symbol: rawSymbol,
+      tried: symbolCandidates,
+      count: hist.length,
+      hint: "For Indian equities try suffix .NS (NSE) or .BO (BSE), e.g. RELIANCE.NS",
+    }, { status: 400 });
   }
   const bars = hist
     .map((h: any) => ({
@@ -53,7 +73,7 @@ export async function POST(req: Request) {
   const startingCapital = body.startingCapital ? Number(body.startingCapital) : undefined;
   const riskPerTrade = body.riskPerTrade ? Number(body.riskPerTrade) : undefined;
   const intraday = !!body.intraday;
-  const symbol = String(body.symbol);
+  const symbol = resolvedSymbol;
 
   const gannFan = projectGannFan(bars, 10);
   const priceSeries = bars.slice(-180).map((b) => ({
@@ -148,3 +168,14 @@ function buildEnsemble(
 }
 
 function round(n: number): number { return Number(n.toFixed(2)); }
+
+/**
+ * Try the user-provided symbol as-is, then common Indian equity suffixes.
+ * Yahoo expects RELIANCE.NS / .BO; users frequently type RELIANCE.
+ */
+function buildSymbolCandidates(raw: string): string[] {
+  const s = raw.toUpperCase();
+  // Already has a suffix or is an index like ^NSEI — use as-is
+  if (s.includes(".") || s.startsWith("^")) return [s];
+  return [`${s}.NS`, `${s}.BO`, s];
+}
