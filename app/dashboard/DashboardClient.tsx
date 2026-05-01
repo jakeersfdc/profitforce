@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { useSearchParams } from "next/navigation";
 import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
@@ -345,8 +344,18 @@ export default function DashboardClient() {
   const [tradingTab, setTradingTab] = useState<TradingTab>("watchlist");
 
   /* ── Sidebar-driven section filter (?view=india|global|stocks|indices|fno|commodities|brokers|outlook|alerts|positions) ── */
-  const searchParams = useSearchParams();
-  const view = (searchParams?.get("view") ?? "overview").toLowerCase();
+  const [view, setView] = useState<string>("overview");
+  useEffect(() => {
+    const read = () => {
+      try {
+        const v = new URL(window.location.href).searchParams.get("view")?.toLowerCase() || "overview";
+        setView(v);
+      } catch { setView("overview"); }
+    };
+    read();
+    window.addEventListener("popstate", read);
+    return () => window.removeEventListener("popstate", read);
+  }, []);
   const SHOW: Record<string, Set<string>> = useMemo(() => ({
     overview:    new Set(["india","global","commodities","commPred","pfBroker","brokers","fno","signals","alerts","outlook","positions"]),
     india:       new Set(["india","global","fno","outlook","signals","alerts","positions"]),

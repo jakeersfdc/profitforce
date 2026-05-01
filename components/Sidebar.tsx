@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   Home,
@@ -24,7 +24,7 @@ import {
   Sparkles,
   Bell,
 } from "lucide-react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 
 type NavItem = { name: string; href: string; icon: typeof Home; section?: string };
 type NavGroup = { label: string; items: NavItem[] };
@@ -79,22 +79,23 @@ function BrandMark() {
 }
 
 export default function Sidebar() {
-  return (
-    <Suspense fallback={null}>
-      <SidebarInner />
-    </Suspense>
-  );
-}
-
-function SidebarInner() {
   const [open, setOpen] = useState(false); // mobile drawer
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("pf_sidebar_collapsed") === "1";
   });
   const pathname = usePathname() || "/";
-  const searchParams = useSearchParams();
-  const currentView = searchParams?.get("view") ?? "";
+
+  // Read ?view= from window.location to avoid useSearchParams SSR bail-out in Next 16
+  const [currentView, setCurrentView] = useState<string>("");
+  useEffect(() => {
+    const read = () => {
+      try { setCurrentView(new URL(window.location.href).searchParams.get("view") ?? ""); } catch { setCurrentView(""); }
+    };
+    read();
+    window.addEventListener("popstate", read);
+    return () => window.removeEventListener("popstate", read);
+  }, [pathname]);
 
   const isActive = (href: string) => {
     // Same-pathname + view query → exact match including ?view=
