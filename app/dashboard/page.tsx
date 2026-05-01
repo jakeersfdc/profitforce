@@ -1,8 +1,12 @@
 "use client";
 
-import React from "react";
+import React, { Suspense } from "react";
 import DashboardClient from './DashboardClient';
 
 export default function DashboardPage() {
-  return <DashboardClient />;
+  return (
+    <Suspense fallback={<div className="p-8 text-center text-white/50">Loading dashboard…</div>}>
+      <DashboardClient />
+    </Suspense>
+  );
 }

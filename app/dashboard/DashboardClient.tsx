@@ -870,6 +870,8 @@ export default function DashboardClient() {
           <a href="/dashboard" className="ml-auto text-[11px] text-white/60 hover:text-white underline">Show all sections →</a>
         </div>
       )}
+      {/* build marker (helps detect stale browser cache) */}
+      <div data-build="sidebar-v2" className="hidden" aria-hidden />
 
       {/* ━━━ INDIA INDICES ━━━ */}
       {show("india") && (
