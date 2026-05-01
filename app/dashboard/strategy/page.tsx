@@ -82,9 +82,18 @@ export default function StrategyLab() {
         }),
       });
       const text = await r.text();
-      const json = text ? (JSON.parse(text) as AllResponse | { error: string }) : null;
+      const json = text ? (JSON.parse(text) as AllResponse | { error: string; hint?: string; tried?: string[]; count?: number }) : null;
       if (!json) throw new Error("Empty response");
-      if ("error" in json) throw new Error(json.error);
+      if ("error" in json) {
+        const detail = [
+          json.error === "insufficient_history"
+            ? `Not enough historical data for "${symbol}".`
+            : json.error,
+          json.hint,
+          json.tried?.length ? `Tried: ${json.tried.join(", ")}` : null,
+        ].filter(Boolean).join(" — ");
+        throw new Error(detail);
+      }
       setData(json);
     } catch (e) {
       setError((e as Error).message);

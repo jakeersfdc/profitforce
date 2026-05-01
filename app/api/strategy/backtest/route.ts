@@ -172,9 +172,24 @@ function round(n: number): number { return Number(n.toFixed(2)); }
 /**
  * Try the user-provided symbol as-is, then common Indian equity suffixes.
  * Yahoo expects RELIANCE.NS / .BO; users frequently type RELIANCE.
+ * Also map common index aliases (NIFTY, SENSEX, BANKNIFTY…) to Yahoo tickers.
  */
 function buildSymbolCandidates(raw: string): string[] {
-  const s = raw.toUpperCase();
+  const s = raw.toUpperCase().trim();
+  // Index aliases that users commonly type without the ^ prefix
+  const indexAliases: Record<string, string[]> = {
+    "NIFTY":      ["^NSEI"],
+    "NIFTY50":    ["^NSEI"],
+    "NIFTY 50":   ["^NSEI"],
+    "BANKNIFTY":  ["^NSEBANK"],
+    "BANK NIFTY": ["^NSEBANK"],
+    "FINNIFTY":   ["NIFTY_FIN_SERVICE.NS", "^CNXFIN"],
+    "SENSEX":     ["^BSESN"],
+    "MIDCAP":     ["^NSEMDCP50"],
+    "GIFTNIFTY":  ["^NSEI"], // GIFT NIFTY tracks NIFTY 50
+    "GIFT NIFTY": ["^NSEI"],
+  };
+  if (indexAliases[s]) return indexAliases[s];
   // Already has a suffix or is an index like ^NSEI — use as-is
   if (s.includes(".") || s.startsWith("^")) return [s];
   return [`${s}.NS`, `${s}.BO`, s];
