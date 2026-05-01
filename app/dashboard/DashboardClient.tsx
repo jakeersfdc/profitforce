@@ -541,7 +541,7 @@ export default function DashboardClient() {
       setIndexOptions(results);
     };
     fetchIndexStrikes();
-    const interval = setInterval(fetchIndexStrikes, 1_000);
+    const interval = setInterval(fetchIndexStrikes, 30_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -2467,6 +2467,95 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
             })}
             {(expertBias !== "AUTO" ? indexPredictions.filter(ip => ip.price > 0) : indexPredictions.filter(ip => ip.sigDir === "BUY" || ip.sigDir === "SELL")).length === 0 && (
               <div className="col-span-full text-center text-white/40 py-3 text-sm">⏸ No actionable index calls for tomorrow — market awaiting direction</div>
+            )}
+          </div>
+        </div>
+
+        {/* Strike-by-strike trade calls (CE + PE per strike around ATM) */}
+        <div>
+          <div className="text-[10px] font-bold text-white/50 uppercase tracking-wider mb-2">📈 Strike-by-Strike Trade Calls — All Live Strikes</div>
+          <div className="space-y-3">
+            {indexOptions.filter(o => o.strikes?.strikes?.liveStrikes && o.strikes.strikes.liveStrikes.length > 0).map(o => {
+              const live = o.strikes!.strikes.liveStrikes!;
+              const atm = o.strikes!.strikes.atm ?? 0;
+              const expiry = o.strikes!.strikes.expiry ?? "";
+              const idxId = indexShortName(o.label);
+              const lot = getLotSize(idxId) ?? getLotSize(o.label) ?? 0;
+              return (
+                <div key={o.sym} className="rounded-lg border border-white/10 bg-[#06101e]/60">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-extrabold text-white">{o.label}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/60 font-bold">ATM {atm}</span>
+                      {expiry && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-800/60 text-purple-300 font-bold">Exp {expiry}</span>}
+                      {lot > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-800/60 text-yellow-200 font-bold">Lot {lot}</span>}
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[11px] font-mono">
+                      <thead>
+                        <tr className="bg-white/5 text-white/60 text-[10px]">
+                          <th className="py-1.5 px-2 text-right border-r border-white/5">CE OI</th>
+                          <th className="py-1.5 px-2 text-right text-green-400">CE LTP</th>
+                          <th className="py-1.5 px-2 text-right text-green-300/70">CE SL</th>
+                          <th className="py-1.5 px-2 text-right text-cyan-300/80">CE Target</th>
+                          <th className="py-1.5 px-2 text-center bg-white/10 text-white font-extrabold">STRIKE</th>
+                          <th className="py-1.5 px-2 text-right text-cyan-300/80">PE Target</th>
+                          <th className="py-1.5 px-2 text-right text-rose-300/70">PE SL</th>
+                          <th className="py-1.5 px-2 text-right text-rose-400">PE LTP</th>
+                          <th className="py-1.5 px-2 text-right border-l border-white/5">PE OI</th>
+                          <th className="py-1.5 px-2 text-center">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {live.map((ls) => {
+                          const isATM = ls.isATM;
+                          const callPrem = ls.callLTP ?? 0;
+                          const putPrem = ls.putLTP ?? 0;
+                          const ceOpts = callPrem > 0 ? estimateOptionSLTarget(callPrem, 60) : null;
+                          const peOpts = putPrem > 0 ? estimateOptionSLTarget(putPrem, 60) : null;
+                          return (
+                            <tr key={ls.strike} className={isATM ? "bg-amber-900/20" : "hover:bg-white/5"}>
+                              <td className="py-1.5 px-2 text-right text-white/60 border-r border-white/5">{ls.callOI ? ls.callOI.toLocaleString("en-IN") : "—"}</td>
+                              <td className="py-1.5 px-2 text-right font-bold text-green-400">{callPrem > 0 ? callPrem.toFixed(2) : "—"}</td>
+                              <td className="py-1.5 px-2 text-right text-rose-300">{ceOpts ? ceOpts.sl : "—"}</td>
+                              <td className="py-1.5 px-2 text-right text-cyan-300">{ceOpts ? `${ceOpts.t1}/${ceOpts.t2}/${ceOpts.t3}` : "—"}</td>
+                              <td className={`py-1.5 px-2 text-center font-extrabold ${isATM ? "text-amber-300 bg-amber-500/10" : "text-white"}`}>
+                                {ls.strike}{isATM && <span className="ml-1 text-[8px] px-1 rounded bg-amber-500/40">ATM</span>}
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-cyan-300">{peOpts ? `${peOpts.t1}/${peOpts.t2}/${peOpts.t3}` : "—"}</td>
+                              <td className="py-1.5 px-2 text-right text-rose-300">{peOpts ? peOpts.sl : "—"}</td>
+                              <td className="py-1.5 px-2 text-right font-bold text-rose-400">{putPrem > 0 ? putPrem.toFixed(2) : "—"}</td>
+                              <td className="py-1.5 px-2 text-right text-white/60 border-l border-white/5">{ls.putOI ? ls.putOI.toLocaleString("en-IN") : "—"}</td>
+                              <td className="py-1.5 px-2 text-center">
+                                <div className="inline-flex gap-1">
+                                  {callPrem > 0 && ceOpts && (
+                                    <button
+                                      onClick={() => onBuyTrade?.({ symbol: idxId, name: o.label, type: "CE", strike: ls.strike, entryPremium: callPrem, sl: ceOpts.sl, t1: ceOpts.t1, t2: ceOpts.t2, t3: ceOpts.t3, lots: 1, expiry })}
+                                      className="px-1.5 py-0.5 rounded bg-green-700 hover:bg-green-600 text-white text-[10px] font-bold"
+                                      title={`Buy ${idxId} ${ls.strike} CE @ ${callPrem}`}
+                                    >+CE</button>
+                                  )}
+                                  {putPrem > 0 && peOpts && (
+                                    <button
+                                      onClick={() => onBuyTrade?.({ symbol: idxId, name: o.label, type: "PE", strike: ls.strike, entryPremium: putPrem, sl: peOpts.sl, t1: peOpts.t1, t2: peOpts.t2, t3: peOpts.t3, lots: 1, expiry })}
+                                      className="px-1.5 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white text-[10px] font-bold"
+                                      title={`Buy ${idxId} ${ls.strike} PE @ ${putPrem}`}
+                                    >+PE</button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+            {indexOptions.filter(o => o.strikes?.strikes?.liveStrikes && o.strikes.strikes.liveStrikes.length > 0).length === 0 && (
+              <div className="text-center text-white/40 py-4 text-sm rounded-lg border border-white/5 bg-white/5">⏳ Loading live option chain…</div>
             )}
           </div>
         </div>
