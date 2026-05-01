@@ -1366,6 +1366,34 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
         if (hist.length === 0) throw new Error("No historical data available");
 
         const hasOHLC = hist[0]?.open != null && hist[0]?.high != null && hist[0]?.low != null;
+        const isIntraday = /^(\d+)(m|h)$/i.test(intv) || intv === "1h" || intv === "60m";
+        // For intraday, use Unix seconds so each bar has a unique time.
+        // For daily+, slice to YYYY-MM-DD (lightweight-charts business day format).
+        const toTime = (raw: unknown): number | string => {
+          const s = String(raw ?? "");
+          if (isIntraday) {
+            const t = new Date(s).getTime();
+            return Number.isFinite(t) ? Math.floor(t / 1000) : 0;
+          }
+          return s.slice(0, 10);
+        };
+        // De-duplicate timestamps (Yahoo occasionally returns repeats) and sort ascending.
+        type HistRow = Record<string, unknown>;
+        const seen = new Set<number | string>();
+        const cleaned: HistRow[] = (hist as HistRow[])
+          .map((h) => ({ ...h, __t: toTime(h.date) }))
+          .filter((h) => {
+            const t = h.__t as number | string;
+            if (t === 0 || t === "" || seen.has(t)) return false;
+            seen.add(t);
+            return true;
+          })
+          .sort((a, b) => {
+            const ta = a.__t as number | string;
+            const tb = b.__t as number | string;
+            if (typeof ta === "number" && typeof tb === "number") return ta - tb;
+            return String(ta).localeCompare(String(tb));
+          });
 
         try { chartRef.current?.remove(); } catch {}
         if (!containerRef.current || !mounted) return;
@@ -1388,13 +1416,13 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
             upColor: "#26a69a", downColor: "#ef5350", borderDownColor: "#ef5350", borderUpColor: "#26a69a",
             wickDownColor: "#ef5350", wickUpColor: "#26a69a",
           });
-          series.setData(hist.map((h: Record<string, unknown>) => ({
-            time: String(h.date ?? "").slice(0, 10),
+          series.setData(cleaned.map((h) => ({
+            time: h.__t as number | string,
             open: Number(h.open), high: Number(h.high), low: Number(h.low), close: Number(h.close),
           })));
         } else {
           series = chart.addLineSeries({ color: "#26a69a", lineWidth: 2 });
-          series.setData(hist.map((h: Record<string, unknown>) => ({ time: String(h.date ?? "").slice(0, 10), value: Number(h.close) })));
+          series.setData(cleaned.map((h) => ({ time: h.__t as number | string, value: Number(h.close) })));
         }
 
         if (target.entry && target.entry > 0) {
@@ -1432,7 +1460,7 @@ function ChartModal({ target, onClose }: { target: ChartTarget; onClose: () => v
               setGann(sjson.gannFan ?? null);
             }
             const fan = sjson.gannFan;
-            if (fan && fan.series && fan.series.length > 1) {
+            if (fan && fan.series && fan.series.length > 1 && !isIntraday) {
               const fanLines: Array<{ key: keyof GannFanSeriesPoint; color: string; title: string }> = [
                 { key: "g4x1", color: "#f87171", title: "Gann 4×1" },
                 { key: "g2x1", color: "#fb923c", title: "Gann 2×1" },
