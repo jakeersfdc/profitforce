@@ -16,18 +16,50 @@ import {
   LogOut,
   Activity,
   FlaskConical,
+  Globe2,
+  Flag,
+  LineChart,
+  Layers,
+  Coins,
+  Sparkles,
+  Bell,
 } from "lucide-react";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 
-const navItems = [
-  { name: "Dashboard", href: "/dashboard", icon: Home },
-  { name: "Signals", href: "/dashboard#alerts", icon: Zap },
-  { name: "OMS", href: "/dashboard/oms", icon: Activity },
-  { name: "Strategy Lab", href: "/dashboard/strategy", icon: FlaskConical },
-  { name: "Positions", href: "/dashboard#positions", icon: Briefcase },
-  { name: "Watchlist", href: "/dashboard#watchlist", icon: Star },
-  { name: "Brokers", href: "/dashboard#brokers", icon: Link2 },
-  { name: "Profile", href: "/profile", icon: User },
+type NavItem = { name: string; href: string; icon: typeof Home; section?: string };
+type NavGroup = { label: string; items: NavItem[] };
+
+const navGroups: NavGroup[] = [
+  {
+    label: "Markets",
+    items: [
+      { name: "Overview", href: "/dashboard", icon: Home },
+      { name: "India Market", href: "/dashboard?view=india", icon: Flag },
+      { name: "Global Market", href: "/dashboard?view=global", icon: Globe2 },
+      { name: "Indices", href: "/dashboard?view=indices", icon: LineChart },
+      { name: "Commodities", href: "/dashboard?view=commodities", icon: Coins },
+    ],
+  },
+  {
+    label: "Trade",
+    items: [
+      { name: "Stocks (Predictions)", href: "/dashboard?view=stocks", icon: Sparkles },
+      { name: "F & O", href: "/dashboard?view=fno", icon: Layers },
+      { name: "Tomorrow's Outlook", href: "/dashboard?view=outlook", icon: Zap },
+      { name: "Live Alerts", href: "/dashboard?view=alerts", icon: Bell },
+      { name: "Positions", href: "/dashboard?view=positions", icon: Briefcase },
+    ],
+  },
+  {
+    label: "Tools",
+    items: [
+      { name: "OMS", href: "/dashboard/oms", icon: Activity },
+      { name: "Strategy Lab", href: "/dashboard/strategy", icon: FlaskConical },
+      { name: "Watchlist", href: "/dashboard?view=stocks#watchlist", icon: Star },
+      { name: "Brokers", href: "/dashboard?view=brokers", icon: Link2 },
+      { name: "Profile", href: "/profile", icon: User },
+    ],
+  },
 ];
 
 function BrandMark() {
@@ -53,6 +85,26 @@ export default function Sidebar() {
     return localStorage.getItem("pf_sidebar_collapsed") === "1";
   });
   const pathname = usePathname() || "/";
+  const searchParams = useSearchParams();
+  const currentView = searchParams?.get("view") ?? "";
+
+  const isActive = (href: string) => {
+    // Same-pathname + view query → exact match including ?view=
+    try {
+      const u = new URL(href, "http://_");
+      const path = u.pathname;
+      const v = u.searchParams.get("view") ?? "";
+      if (path !== pathname) return false;
+      if (path === "/dashboard") {
+        // Overview = /dashboard with no view param
+        if (!v) return !currentView;
+        return v === currentView;
+      }
+      return true;
+    } catch {
+      return pathname === href;
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== "undefined")
@@ -142,33 +194,44 @@ export default function Sidebar() {
           </button>
         </div>
 
-        <nav className="mt-4 flex-1">
-          <ul className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = pathname === item.href;
-              return (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    title={collapsed ? item.name : undefined}
-                    className={`nav-item group relative flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
-                      active
-                        ? "bf-active bg-white/10 text-white"
-                        : "text-white/70 hover:text-white hover:bg-white/5"
-                    } ${collapsed ? "justify-center" : ""}`}
-                  >
-                    {active && (
-                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-gradient-to-b from-emerald-400 to-cyan-500" />
-                    )}
-                    <Icon size={18} className="shrink-0" />
-                    {!collapsed && (
-                      <span className="text-sm font-medium">{item.name}</span>
-                    )}
-                  </Link>
-                </li>
-              );
-            })}
+        <nav className="mt-4 flex-1 overflow-y-auto pr-1">
+          <ul className="space-y-3">
+            {navGroups.map((group) => (
+              <li key={group.label}>
+                {!collapsed && (
+                  <div className="px-3 mb-1 text-[10px] font-bold uppercase tracking-wider text-white/40">
+                    {group.label}
+                  </div>
+                )}
+                <ul className="space-y-1">
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.href);
+                    return (
+                      <li key={item.href}>
+                        <Link
+                          href={item.href}
+                          title={collapsed ? item.name : undefined}
+                          className={`nav-item group relative flex items-center gap-3 px-3 py-2 rounded-lg transition-all ${
+                            active
+                              ? "bf-active bg-white/10 text-white"
+                              : "text-white/70 hover:text-white hover:bg-white/5"
+                          } ${collapsed ? "justify-center" : ""}`}
+                        >
+                          {active && (
+                            <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-gradient-to-b from-emerald-400 to-cyan-500" />
+                          )}
+                          <Icon size={18} className="shrink-0" />
+                          {!collapsed && (
+                            <span className="text-sm font-medium">{item.name}</span>
+                          )}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </li>
+            ))}
           </ul>
         </nav>
 
@@ -220,30 +283,39 @@ export default function Sidebar() {
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4">
-          <ul className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = pathname === item.href;
-              return (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    onClick={() => setOpen(false)}
-                    className={`relative flex items-center gap-3 px-3 py-3 rounded-lg transition-colors ${
-                      active
-                        ? "bg-white/10 text-white"
-                        : "text-white/75 hover:bg-white/5 active:bg-white/10"
-                    }`}
-                  >
-                    {active && (
-                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-gradient-to-b from-emerald-400 to-cyan-500" />
-                    )}
-                    <Icon size={18} className="shrink-0" />
-                    <span className="text-[14px] font-medium">{item.name}</span>
-                  </Link>
-                </li>
-              );
-            })}
+          <ul className="space-y-3">
+            {navGroups.map((group) => (
+              <li key={group.label}>
+                <div className="px-3 mb-1 text-[10px] font-bold uppercase tracking-wider text-white/40">
+                  {group.label}
+                </div>
+                <ul className="space-y-1">
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.href);
+                    return (
+                      <li key={item.href}>
+                        <Link
+                          href={item.href}
+                          onClick={() => setOpen(false)}
+                          className={`relative flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors ${
+                            active
+                              ? "bg-white/10 text-white"
+                              : "text-white/75 hover:bg-white/5 active:bg-white/10"
+                          }`}
+                        >
+                          {active && (
+                            <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-gradient-to-b from-emerald-400 to-cyan-500" />
+                          )}
+                          <Icon size={18} className="shrink-0" />
+                          <span className="text-[14px] font-medium">{item.name}</span>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </li>
+            ))}
           </ul>
         </nav>
 

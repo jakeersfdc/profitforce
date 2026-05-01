@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { createChart, IChartApi, LineStyle } from "lightweight-charts";
 import { useAuth } from "@/components/AuthProvider";
 import { TradingTabBar, TradingTabContent, type TradingTab } from "@/components/TradingTabs";
@@ -342,6 +343,25 @@ export default function DashboardClient() {
   const [chartTarget, setChartTarget] = useState<ChartTarget | null>(null);
   const [activeView, setActiveView] = useState<"signals" | "trading">("signals");
   const [tradingTab, setTradingTab] = useState<TradingTab>("watchlist");
+
+  /* ── Sidebar-driven section filter (?view=india|global|stocks|indices|fno|commodities|brokers|outlook|alerts|positions) ── */
+  const searchParams = useSearchParams();
+  const view = (searchParams?.get("view") ?? "overview").toLowerCase();
+  const SHOW: Record<string, Set<string>> = useMemo(() => ({
+    overview:    new Set(["india","global","commodities","commPred","pfBroker","brokers","fno","signals","alerts","outlook","positions"]),
+    india:       new Set(["india","fno","outlook","signals","alerts","positions"]),
+    global:      new Set(["global","commodities","commPred","positions"]),
+    stocks:      new Set(["signals","alerts","positions"]),
+    indices:     new Set(["india","global","fno","outlook","positions"]),
+    fno:         new Set(["fno","outlook","positions"]),
+    commodities: new Set(["commodities","commPred","positions"]),
+    brokers:     new Set(["pfBroker","brokers","positions"]),
+    outlook:     new Set(["outlook","positions"]),
+    alerts:      new Set(["alerts","positions"]),
+    positions:   new Set(["positions"]),
+  }), []);
+  const sectionsOn = SHOW[view] ?? SHOW.overview;
+  const show = useCallback((id: string) => sectionsOn.has(id), [sectionsOn]);
 
   /* ── Sidebar deep-links: switch view/tab based on URL hash ── */
   useEffect(() => {
@@ -842,7 +862,17 @@ export default function DashboardClient() {
       ) : (
       <>
 
+      {/* ━━━ VIEW BANNER (when sidebar filter active) ━━━ */}
+      {view !== "overview" && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-blue-500/15 via-cyan-500/10 to-emerald-500/10 border border-white/10">
+          <span className="text-base">📍</span>
+          <span className="text-sm font-bold text-white capitalize">{({india:"India Market",global:"Global Market",stocks:"Stocks — Predictions",indices:"Indices",fno:"F & O",commodities:"Commodities",brokers:"Brokers",outlook:"Tomorrow's Outlook",alerts:"Live Alerts",positions:"My Positions"} as Record<string,string>)[view] ?? view}</span>
+          <a href="/dashboard" className="ml-auto text-[11px] text-white/60 hover:text-white underline">Show all sections →</a>
+        </div>
+      )}
+
       {/* ━━━ INDIA INDICES ━━━ */}
+      {show("india") && (
       <section>
         <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">India Markets</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
@@ -852,16 +882,20 @@ export default function DashboardClient() {
           })}
         </div>
       </section>
+      )}
 
       {/* ━━━ GLOBAL INDICES ━━━ */}
+      {show("global") && (
       <section>
         <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-2">Global Markets</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           {globalIdx.map((idx) => <IndexCardSmall key={idx.id} idx={idx} fl={flash[idx.id]} onChartClick={() => setChartTarget({ symbol: idx.sym, name: idx.name, entry: null, sl: null, target: null, signal: "HOLD", currentPrice: idx.price })} />)}
         </div>
       </section>
+      )}
 
       {/* ━━━ COMMODITIES (Int'l reference, or MCX if anchors configured) ━━━ */}
+      {show("commodities") && (
       <section>
         <h2 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-1">
           Commodities
@@ -914,20 +948,26 @@ export default function DashboardClient() {
           })}
         </div>
       </section>
+      )}
 
       {/* ━━━ COMMODITY PREDICTIONS ━━━ */}
-      <CommodityPredictions commodities={commodityIdx} usdInr={usdInr} mcxAnchors={mcxAnchors as RuntimeAnchorMap | null} onBuyTrade={addTrade} />
+      {show("commPred") && (
+        <CommodityPredictions commodities={commodityIdx} usdInr={usdInr} mcxAnchors={mcxAnchors as RuntimeAnchorMap | null} onBuyTrade={addTrade} />
+      )}
 
       {/* ━━━ PROFITFORCE BROKER (in-house virtual broker) ━━━ */}
-      <ProfitForceBrokerPanel />
+      {show("pfBroker") && <ProfitForceBrokerPanel />}
 
       {/* ━━━ CONNECT REAL BROKERS (Zerodha / Upstox / Angel One / Dhan) ━━━ */}
+      {show("brokers") && (
       <section id="brokers">
         <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">🔗 Connect Your Broker</h2>
         <BrokerConnectPanel />
       </section>
+      )}
 
       {/* ━━━ INDEX OPTIONS: NIFTY / SENSEX / BANKNIFTY ━━━ */}
+      {show("fno") && (
       <section className="relative">
         <h2 className="text-sm font-extrabold text-white uppercase tracking-wider mb-3">📈 Index Options — Strike Prices & Trade Calls</h2>
         {!isPro && !subLoading && (
@@ -948,12 +988,15 @@ export default function DashboardClient() {
           ))}
         </div>
       </section>
+      )}
 
       {/* ━━━ MAIN CONTENT ━━━ */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      {(show("signals") || show("alerts")) && (
+      <div className={`grid grid-cols-1 ${show("signals") && show("alerts") ? "lg:grid-cols-3" : ""} gap-4`}>
 
         {/* ── SIGNALS TABLE (2/3) ── */}
-        <section className="lg:col-span-2 space-y-2">
+        {show("signals") && (
+        <section className={`${show("alerts") ? "lg:col-span-2" : ""} space-y-2`}>
           <div className="flex items-center justify-between">
             <h2 className="text-base font-bold flex items-center gap-2 text-white">
               📊 Options Signals
@@ -1120,8 +1163,10 @@ export default function DashboardClient() {
             </div>
           </div>
         </section>
+        )}
 
         {/* ── LIVE ALERTS PANEL (1/3) ── */}
+        {show("alerts") && (
         <section id="alerts" className="space-y-2">
           <h2 className="text-sm sm:text-base font-extrabold flex items-center gap-2 text-white">
             🔔 Live Alerts
@@ -1194,17 +1239,23 @@ export default function DashboardClient() {
             </div>
           </div>
         </section>
+        )}
       </div>
+      )}
 
       {/* ━━━ TOMORROW'S OUTLOOK — based on signals + global markets ━━━ */}
-      <TomorrowOutlook indices={indices} indexOptions={indexOptions} signals={signals} onBuyTrade={addTrade} />
+      {show("outlook") && (
+        <TomorrowOutlook indices={indices} indexOptions={indexOptions} signals={signals} onBuyTrade={addTrade} />
+      )}
 
       {/* ━━━ MY POSITIONS ━━━ */}
+      {show("positions") && (
       <div id="positions">
         {trackedTrades.length > 0 && (
           <MyPositions trades={trackedTrades} onExit={exitTrade} onRemove={removeTrade} onChartClick={(t) => setChartTarget({ symbol: t.symbol, name: t.name, entry: t.strike, sl: null, target: null, signal: t.type === "CE" ? "BUY" : "SELL", currentPrice: t.spotPrice ?? null })} />
         )}
       </div>
+      )}
 
       {/* ━━━ SUBSCRIPTION MANAGEMENT ━━━ */}
       {false && isSignedIn && !subLoading && (
