@@ -86,3 +86,7 @@ next-env.d.ts
 /.clerk/
 
 .vercel
+
+resp*.html
+root.html
+deploy.log
