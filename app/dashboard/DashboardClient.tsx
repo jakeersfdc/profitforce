@@ -505,7 +505,7 @@ export default function DashboardClient() {
     };
 
     void tick();
-    const interval = setInterval(tick, 1_000);
+    const interval = setInterval(tick, 3_000);
     return () => clearInterval(interval);
   }, [openSymbolsKey]);
 
@@ -539,7 +539,7 @@ export default function DashboardClient() {
   const streamRef = useRef<EventSource | null>(null);
   const prevPrices = useRef<Record<string, number>>({});
 
-  /* ── auto-fetch index options on mount + every 30s ── */
+  /* ── auto-fetch index options on mount + every 30s (fallback poll, primary feed is SSE) ── */
   useEffect(() => {
     const fetchIndexStrikes = async () => {
       const syms = ["^NSEI", "^BSESN", "NIFTY_FIN_SERVICE.NS", "^NSEBANK", "^GNIFTY"];
@@ -580,7 +580,7 @@ export default function DashboardClient() {
       setIndexOptions(results);
     };
     fetchIndexStrikes();
-    const interval = setInterval(fetchIndexStrikes, 1_000);
+    const interval = setInterval(fetchIndexStrikes, 30_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -656,6 +656,41 @@ export default function DashboardClient() {
           const { results } = JSON.parse(ev.data);
           setSignals(results ?? []);
           setSignalsLoading(false);
+        } catch { /* */ }
+      });
+
+      es.addEventListener("indexOptions", (ev) => {
+        try {
+          const { items } = JSON.parse(ev.data);
+          if (!Array.isArray(items)) return;
+          setIndexOptions((prev) =>
+            prev.map((row) => {
+              const m = items.find((x: any) => x.sym === row.sym);
+              if (!m) return row;
+              return {
+                ...row,
+                signal: m.signal
+                  ? {
+                      symbol: m.sym,
+                      name: m.label,
+                      signal: m.signal.signal ?? "HOLD",
+                      entryPrice: m.signal.entryPrice ?? null,
+                      stopLoss: m.signal.stopLoss ?? null,
+                      targetPrice: m.signal.targetPrice ?? null,
+                      trailingStop: m.signal.trailingStop ?? null,
+                      strength: m.signal.strength ?? 0,
+                      confidence: m.signal.confidence ?? 0,
+                      reason: m.signal.reason ?? "",
+                      fnoRecommendation: m.signal.fnoRecommendation ?? null,
+                      timestamp: m.signal.timestamp ?? null,
+                    }
+                  : row.signal,
+                strikes: m.strikes ?? row.strikes,
+                loading: false,
+                error: m.error ?? null,
+              };
+            })
+          );
         } catch { /* */ }
       });
 
