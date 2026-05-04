@@ -2346,6 +2346,11 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
   // ── Direction lock per index: hold CE/PE until target/SL hit OR strong opposite consensus ──
   type LockState = { side: "CE" | "PE"; strike: number; entry: number; sl: number; target: number; reason: string; lockedAt: number };
   const lockRef = useRef<Record<string, LockState | null>>({});
+  // Hysteresis: remember the last issued sigDir + a pending opposite count per
+  // index. Require 2 consecutive same-direction reads before flipping BUY↔SELL.
+  // This kills the mid-session flip-flop driven by live-bar splicing flipping
+  // indicators (RSI 50, MACD histogram sign) on every poll.
+  const sigDirRef = useRef<Record<string, { dir: "BUY" | "SELL" | "HOLD"; pending: "BUY" | "SELL" | "HOLD"; pendingCount: number }>>({});
   const activeSide = useMemo<Record<string, LockState | null>>(() => {
     const prev = lockRef.current;
     const next: Record<string, LockState | null> = { ...prev };
@@ -2454,15 +2459,49 @@ function TomorrowOutlook({ indices, indexOptions, signals, onBuyTrade }: { indic
     const liveStrength = sig?.strength ?? 0;
     const ens = ensemble[idx.id];
     // Fuse: 60% all-strategies ensemble + 40% live momentum signal (when both present).
+    // BUT: when ensemble (daily-bar lagging) disagrees with live momentum on a
+    // sharp intraday move (>=0.6%), flip the weighting so live tape dominates —
+    // the ensemble is by definition stale during an intraday regime change.
     let sigDir = liveDir;
     let strength = liveStrength;
     if (ens && ens.total > 0) {
       const ensScore = ens.top === "BUY" ? ens.confidence : ens.top === "SELL" ? -ens.confidence : 0;
       const liveScore = liveDir === "BUY" ? liveStrength : liveDir === "SELL" ? -liveStrength : 0;
-      const fused = ensScore * 0.6 + liveScore * 0.4;
+      const sharpIntraday = Math.abs(change) >= 0.6;
+      const signsDisagree = ensScore * liveScore < 0;
+      let wEns = 0.6, wLive = 0.4;
+      if (sharpIntraday && signsDisagree) { wEns = 0.3; wLive = 0.7; }
+      const fused = ensScore * wEns + liveScore * wLive;
       sigDir = fused > 15 ? "BUY" : fused < -15 ? "SELL" : "HOLD";
       strength = Math.min(100, Math.round(Math.abs(fused)));
     }
+    // Hysteresis: require 2 consecutive same-direction reads before flipping
+    // BUY↔SELL. HOLD transitions freely. Prevents mid-session flip-flop.
+    const histRec = sigDirRef.current[idx.id] ?? { dir: "HOLD" as const, pending: "HOLD" as const, pendingCount: 0 };
+    let stableDir: "BUY" | "SELL" | "HOLD" = histRec.dir;
+    const newDir = sigDir as "BUY" | "SELL" | "HOLD";
+    if (newDir === histRec.dir) {
+      stableDir = newDir;
+      sigDirRef.current[idx.id] = { dir: newDir, pending: newDir, pendingCount: 0 };
+    } else if (histRec.dir === "HOLD" || newDir === "HOLD") {
+      // Free transition into/out of HOLD
+      stableDir = newDir;
+      sigDirRef.current[idx.id] = { dir: newDir, pending: newDir, pendingCount: 0 };
+    } else {
+      // BUY↔SELL flip — require pending to repeat
+      if (histRec.pending === newDir && histRec.pendingCount >= 1) {
+        stableDir = newDir;
+        sigDirRef.current[idx.id] = { dir: newDir, pending: newDir, pendingCount: 0 };
+      } else {
+        stableDir = histRec.dir;
+        sigDirRef.current[idx.id] = {
+          dir: histRec.dir,
+          pending: newDir,
+          pendingCount: histRec.pending === newDir ? histRec.pendingCount + 1 : 1,
+        };
+      }
+    }
+    sigDir = stableDir;
     const entry = Number(sig?.entryPrice ?? price);
     const sl = Number(sig?.stopLoss ?? 0);
     const tgt = Number(sig?.targetPrice ?? 0);

@@ -653,12 +653,15 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (obvSlope > 0) { bullScore += 1; reasons.push('OBV rising'); }
   if (obvSlope < 0) { bearScore += 1; reasons.push('OBV falling'); }
 
-  // 9. Volume confirmation — last bar vs 20-bar avg
-  const avgVol20 = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
-  const volRatio = volumes[n - 1] / (avgVol20 || 1);
-  if (volRatio > 1.5) {
-    if (lastClose > prevClose) { bullScore += 1; reasons.push(`High volume up (${volRatio.toFixed(1)}x)`); }
-    else { bearScore += 1; reasons.push(`High volume down (${volRatio.toFixed(1)}x)`); }
+  // 9. Volume confirmation — last bar vs 20-bar avg.
+  //    Today's bar is partial (live-spliced), so its volume is unreliable.
+  //    Use the previous (complete) bar for confirmation.
+  const avgVol20 = volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
+  const volRatio = volumes[n - 2] / (avgVol20 || 1);
+  const prev2Close = closes[n - 3];
+  if (volRatio > 1.5 && Number.isFinite(prev2Close) && prevClose !== prev2Close) {
+    if (prevClose > prev2Close) { bullScore += 1; reasons.push(`High volume up yesterday (${volRatio.toFixed(1)}x)`); }
+    else { bearScore += 1; reasons.push(`High volume down yesterday (${volRatio.toFixed(1)}x)`); }
   }
 
   // 10. Support & Resistance proximity scoring
@@ -809,7 +812,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     signal = 'HOLD';
     reasons.push('VETO: counter-trend SELL on sharp bull day in confirmed uptrend');
   }
-  // Weaker guard: any BUY on a sharp bear day needs overwhelming confluence
+  // Sharp-day guard: any BUY on a sharp bear day needs overwhelming confluence
   if (signal === 'BUY' && isSharpDownDay && netScore < minConfluence + 2) {
     signal = 'HOLD';
     reasons.push('VETO: insufficient confluence for BUY on sharp bear day');
@@ -817,6 +820,31 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (signal === 'SELL' && isSharpUpDay && netScore > -(minConfluence + 2)) {
     signal = 'HOLD';
     reasons.push('VETO: insufficient confluence for SELL on sharp bull day');
+  }
+  // Moderate-day guard: BUY on a moderate bear day requires elevated confluence
+  // (this catches -0.5% to -1.2% sessions where a few oversold-RSI BUYs would
+  //  otherwise sneak through and contradict the obvious intraday direction).
+  if (signal === 'BUY' && isModerateDownDay && !isSharpDownDay && netScore < minConfluence + 3) {
+    signal = 'HOLD';
+    reasons.push(`VETO: BUY needs stronger confluence on bear day (${(dayChangePct * 100).toFixed(2)}%)`);
+  }
+  if (signal === 'SELL' && isModerateUpDay && !isSharpUpDay && netScore > -(minConfluence + 3)) {
+    signal = 'HOLD';
+    reasons.push(`VETO: SELL needs stronger confluence on bull day (+${(dayChangePct * 100).toFixed(2)}%)`);
+  }
+  // Intraday-regime hard veto: never call BUY when today is red AND price is
+  // below both VWAP and EMA21 (multi-timeframe bearish alignment), regardless
+  // of confluence score. Mirror for SELL on a green day above VWAP+EMA21.
+  // This is what an experienced trader does: respect the tape.
+  const intradayBear = dayChangePct <= -0.006 && lastClose < vwapVal && lastClose < ema21[n - 1];
+  const intradayBull = dayChangePct >= 0.006 && lastClose > vwapVal && lastClose > ema21[n - 1];
+  if (signal === 'BUY' && intradayBear) {
+    signal = 'HOLD';
+    reasons.push('VETO: BUY blocked — price below VWAP & EMA21 on a red day');
+  }
+  if (signal === 'SELL' && intradayBull) {
+    signal = 'HOLD';
+    reasons.push('VETO: SELL blocked — price above VWAP & EMA21 on a green day');
   }
 
   // EXIT signal: counter-trend trigger when in position context
