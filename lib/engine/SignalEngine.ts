@@ -551,6 +551,38 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const strongUptrend = emaBull && ema50Slope > 0 && longTermBull;
   const strongDowntrend = emaBear && ema50Slope < 0 && longTermBear;
 
+  // ── Higher-timeframe (weekly) trend — the most important filter a senior
+  //    trader uses. Synthesise weekly closes from daily by sampling every 5th bar
+  //    (close-of-week proxy). Then check 10-week & 30-week EMAs (≈50 & 150 daily).
+  //    A 30-year trader's rule: **never trade against the weekly direction**
+  //    unless evidence is overwhelming.
+  const weeklyCloses: number[] = [];
+  for (let i = closes.length - 1; i >= 0; i -= 5) weeklyCloses.unshift(closes[i]);
+  const wkEma10 = weeklyCloses.length >= 10 ? ema(weeklyCloses, 10) : null;
+  const wkEma30 = weeklyCloses.length >= 30 ? ema(weeklyCloses, 30) : null;
+  const wkEma10Last = wkEma10 ? wkEma10[wkEma10.length - 1] : NaN;
+  const wkEma30Last = wkEma30 ? wkEma30[wkEma30.length - 1] : NaN;
+  const wkEma10Slope = wkEma10 && wkEma10.length >= 4
+    ? wkEma10[wkEma10.length - 1] - wkEma10[wkEma10.length - 4]
+    : 0;
+  const weeklyBull = Number.isFinite(wkEma10Last) && Number.isFinite(wkEma30Last)
+    && wkEma10Last > wkEma30Last && wkEma10Slope >= 0 && lastClose > wkEma30Last;
+  const weeklyBear = Number.isFinite(wkEma10Last) && Number.isFinite(wkEma30Last)
+    && wkEma10Last < wkEma30Last && wkEma10Slope <= 0 && lastClose < wkEma30Last;
+
+  // ── Primary bias — single biggest decision a 30-year trader makes ─────────
+  //    LONG_ONLY: weekly bull → only BUY setups allowed (SELL needs reversal proof)
+  //    SHORT_ONLY: weekly bear → only SELL setups allowed
+  //    NEUTRAL: choppy/transition → either side OK with high confluence
+  type PrimaryBias = "LONG_ONLY" | "SHORT_ONLY" | "NEUTRAL";
+  let primaryBias: PrimaryBias = "NEUTRAL";
+  if (weeklyBull && lastClose > ema200[n - 1]) primaryBias = "LONG_ONLY";
+  else if (weeklyBear && lastClose < ema200[n - 1]) primaryBias = "SHORT_ONLY";
+
+  // Prior-day high / low — classic levels every floor trader watches.
+  const pdh = highs[n - 2];
+  const pdl = lows[n - 2];
+
   // Today's candle (price-action) — sharp closes shouldn't be ignored
   const dayChangePct = prevClose > 0 ? (lastClose - prevClose) / prevClose : 0;
   const isSharpDownDay = dayChangePct <= -0.012;  // -1.2%+ is a decisive bear close
@@ -628,18 +660,26 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     }
   }
 
-  // 4. EMA alignment
-  if (ema9[n - 1] > ema21[n - 1] && ema21[n - 1] > ema50[n - 1]) { bullScore += 2; reasons.push('EMA 9>21>50 aligned'); }
-  if (ema9[n - 1] < ema21[n - 1] && ema21[n - 1] < ema50[n - 1]) { bearScore += 2; reasons.push('EMA 9<21<50 aligned'); }
-  // Golden/death cross
-  if (n > 1 && ema50[n - 1] > ema200[n - 1] && ema50[n - 2] <= ema200[n - 2]) { bullScore += 2; reasons.push('Golden cross (EMA50>200)'); }
-  if (n > 1 && ema50[n - 1] < ema200[n - 1] && ema50[n - 2] >= ema200[n - 2]) { bearScore += 2; reasons.push('Death cross (EMA50<200)'); }
-
-  // 5. SuperTrend
-  if (stTrend === 'up') { bullScore += 2; reasons.push('SuperTrend UP'); }
-  if (stTrend === 'down') { bearScore += 2; reasons.push('SuperTrend DOWN'); }
-  if (stTrend === 'up' && stTrendPrev === 'down') { bullScore += 1; reasons.push('SuperTrend flipped UP'); }
-  if (stTrend === 'down' && stTrendPrev === 'up') { bearScore += 1; reasons.push('SuperTrend flipped DOWN'); }
+  // 4-5. Trend confirmation (combined to avoid double-counting correlated indicators).
+  //      EMA stack, EMA 50/200 cross, and SuperTrend all measure the *same*
+  //      thing — primary trend. A pro trader counts this as ONE vote, not three.
+  //      Cap contribution at +/-3 total.
+  let trendVote = 0;
+  const trendReasons: string[] = [];
+  if (ema9[n - 1] > ema21[n - 1] && ema21[n - 1] > ema50[n - 1]) { trendVote += 1; trendReasons.push('EMA 9>21>50 aligned'); }
+  if (ema9[n - 1] < ema21[n - 1] && ema21[n - 1] < ema50[n - 1]) { trendVote -= 1; trendReasons.push('EMA 9<21<50 aligned'); }
+  if (ema50[n - 1] > ema200[n - 1]) { trendVote += 1; trendReasons.push('EMA50 > EMA200'); }
+  if (ema50[n - 1] < ema200[n - 1]) { trendVote -= 1; trendReasons.push('EMA50 < EMA200'); }
+  if (stTrend === 'up') { trendVote += 1; trendReasons.push('SuperTrend UP'); }
+  if (stTrend === 'down') { trendVote -= 1; trendReasons.push('SuperTrend DOWN'); }
+  // Fresh cross gets ONE bonus point (asymmetric — captures momentum shift)
+  if (n > 1 && ema50[n - 1] > ema200[n - 1] && ema50[n - 2] <= ema200[n - 2]) { trendVote += 1; trendReasons.push('Golden cross (fresh)'); }
+  if (n > 1 && ema50[n - 1] < ema200[n - 1] && ema50[n - 2] >= ema200[n - 2]) { trendVote -= 1; trendReasons.push('Death cross (fresh)'); }
+  if (stTrend === 'up' && stTrendPrev === 'down') { trendVote += 1; trendReasons.push('SuperTrend flipped UP'); }
+  if (stTrend === 'down' && stTrendPrev === 'up') { trendVote -= 1; trendReasons.push('SuperTrend flipped DOWN'); }
+  trendVote = Math.max(-3, Math.min(3, trendVote));
+  if (trendVote > 0) { bullScore += trendVote; reasons.push(`Trend bullish (+${trendVote}): ${trendReasons.join(', ')}`); }
+  else if (trendVote < 0) { bearScore += -trendVote; reasons.push(`Trend bearish (${trendVote}): ${trendReasons.join(', ')}`); }
 
   // 6. ADX (trend strength)
   const trending = adxVal > 25;
@@ -791,6 +831,22 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     reasons.push(`Below pivot (₹${round(pivots.pp)})`);
   }
 
+  // 16. Prior-day high / low — every floor trader watches these.
+  //     Trading above PDH = bullish breakout; below PDL = bearish breakdown;
+  //     between = chop / range day → reduce conviction.
+  if (Number.isFinite(pdh) && Number.isFinite(pdl)) {
+    if (lastClose > pdh) { bullScore += 2; reasons.push(`Above PDH ₹${round(pdh)} (breakout)`); }
+    else if (lastClose < pdl) { bearScore += 2; reasons.push(`Below PDL ₹${round(pdl)} (breakdown)`); }
+    else {
+      // Inside prior day's range — neither side has conviction
+      reasons.push(`Inside prior range (${round(pdl)}–${round(pdh)})`);
+    }
+  }
+
+  // 17. Higher-timeframe (weekly) bias — the senior-trader filter.
+  if (weeklyBull) { bullScore += 2; reasons.push('Weekly trend BULL'); }
+  if (weeklyBear) { bearScore += 2; reasons.push('Weekly trend BEAR'); }
+
   // ── Determine signal ──────────────────────────────────────────────────────
   const netScore = bullScore - bearScore;
   const totalVotes = bullScore + bearScore;
@@ -799,6 +855,38 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   let signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD' = 'HOLD';
   if (netScore >= minConfluence) signal = 'BUY';
   else if (netScore <= -minConfluence) signal = 'SELL';
+
+  // ── PRIMARY-BIAS HARD GATE (single most important pro-trader filter) ──────
+  //    Rule a 30-year trader lives by: never trade against the higher-timeframe
+  //    trend unless the evidence is overwhelming AND the move has a confirmed
+  //    structural reversal trigger. Without it, you're trying to catch tops/
+  //    bottoms — the fastest way to bleed.
+  if (primaryBias === "LONG_ONLY" && signal === "SELL") {
+    // Allow only with overwhelming confluence + sharp bear day + below VWAP
+    const reversalProof = netScore <= -(minConfluence + 4) && isSharpDownDay && lastClose < vwapVal;
+    if (!reversalProof) {
+      signal = 'HOLD';
+      reasons.push('GATE: SELL blocked — weekly trend is BULL (LONG_ONLY regime)');
+    }
+  }
+  if (primaryBias === "SHORT_ONLY" && signal === "BUY") {
+    const reversalProof = netScore >= (minConfluence + 4) && isSharpUpDay && lastClose > vwapVal;
+    if (!reversalProof) {
+      signal = 'HOLD';
+      reasons.push('GATE: BUY blocked — weekly trend is BEAR (SHORT_ONLY regime)');
+    }
+  }
+  // In NEUTRAL regime, require slightly higher confluence (no clear bias)
+  if (primaryBias === "NEUTRAL") {
+    if (signal === 'BUY' && netScore < minConfluence + 1) {
+      signal = 'HOLD';
+      reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for BUY');
+    }
+    if (signal === 'SELL' && netScore > -(minConfluence + 1)) {
+      signal = 'HOLD';
+      reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for SELL');
+    }
+  }
 
   // ── Counter-trend veto (expert-trader discipline) ─────────────────────────
   // A BUY on a sharp bear day in a confirmed downtrend with strong ADX is
