@@ -9,6 +9,7 @@
  */
 
 import { getHistorical, fetchQuote, suggestOptionStrikes } from '../stockUtils';
+import { readOI } from './oiAnalysis';
 
 // ── Indicator helpers ─────────────────────────────────────────────────────────
 
@@ -30,6 +31,59 @@ function sma(values: number[], period: number): (number | null)[] {
     result.push(sum / period);
   }
   return result;
+}
+
+// ── Guppy Multiple Moving Average (GMMA) ──────────────────────────────────
+// Daryl Guppy's twin-ribbon EMA system. The short ribbon (3,5,8,10,12,15)
+// represents short-term traders; the long ribbon (30,35,40,45,50,60) represents
+// investors. Their geometry tells you regime AND conviction:
+//   • Short above long, both expanding  → strong uptrend
+//   • Short below long, both expanding  → strong downtrend
+//   • Ribbons compressed/overlapping    → indecision / regime change near
+//   • Short crossing into long          → trend reversal warning
+function gmmaState(closes: number[]): {
+  shortAvg: number;
+  longAvg: number;
+  shortSpread: number;     // dispersion of short ribbon (volatility-of-trend proxy)
+  longSpread: number;
+  state: 'BULL_EXPANSION' | 'BEAR_EXPANSION' | 'BULL_COMPRESSION' | 'BEAR_COMPRESSION' | 'CHOP';
+  freshCross: 'UP' | 'DOWN' | null;
+} {
+  const SHORT = [3, 5, 8, 10, 12, 15];
+  const LONG = [30, 35, 40, 45, 50, 60];
+  const last = (arr: number[]) => arr[arr.length - 1];
+  const shortVals = SHORT.map(p => last(ema(closes, p)));
+  const longVals = LONG.map(p => last(ema(closes, p)));
+  const prevShortVals = SHORT.map(p => {
+    const e = ema(closes, p);
+    return e[e.length - 2] ?? e[e.length - 1];
+  });
+  const prevLongVals = LONG.map(p => {
+    const e = ema(closes, p);
+    return e[e.length - 2] ?? e[e.length - 1];
+  });
+  const shortAvg = shortVals.reduce((a, b) => a + b, 0) / shortVals.length;
+  const longAvg = longVals.reduce((a, b) => a + b, 0) / longVals.length;
+  const shortSpread = (Math.max(...shortVals) - Math.min(...shortVals)) / Math.max(shortAvg, 1);
+  const longSpread = (Math.max(...longVals) - Math.min(...longVals)) / Math.max(longAvg, 1);
+  const prevShortAvg = prevShortVals.reduce((a, b) => a + b, 0) / prevShortVals.length;
+  const prevLongAvg = prevLongVals.reduce((a, b) => a + b, 0) / prevLongVals.length;
+
+  const aboveNow = shortAvg > longAvg;
+  const aboveBefore = prevShortAvg > prevLongAvg;
+  const freshCross: 'UP' | 'DOWN' | null = aboveNow && !aboveBefore ? 'UP' : !aboveNow && aboveBefore ? 'DOWN' : null;
+
+  // Compressed = both ribbons spread tightly relative to price (no conviction)
+  const compressed = longSpread < 0.01;
+  let state: 'BULL_EXPANSION' | 'BEAR_EXPANSION' | 'BULL_COMPRESSION' | 'BEAR_COMPRESSION' | 'CHOP';
+  if (Math.abs(shortAvg - longAvg) / Math.max(longAvg, 1) < 0.003) {
+    state = 'CHOP';
+  } else if (aboveNow && !compressed) state = 'BULL_EXPANSION';
+  else if (aboveNow && compressed) state = 'BULL_COMPRESSION';
+  else if (!aboveNow && !compressed) state = 'BEAR_EXPANSION';
+  else state = 'BEAR_COMPRESSION';
+
+  return { shortAvg, longAvg, shortSpread, longSpread, state, freshCross };
 }
 
 function rsi(closes: number[], period = 14): (number | null)[] {
@@ -846,6 +900,28 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   // 17. Higher-timeframe (weekly) bias — the senior-trader filter.
   if (weeklyBull) { bullScore += 2; reasons.push('Weekly trend BULL'); }
   if (weeklyBear) { bearScore += 2; reasons.push('Weekly trend BEAR'); }
+
+  // 18. GMMA (Guppy Multiple Moving Average) — twin-ribbon trend system.
+  //     Tells us BOTH direction AND conviction in a single read.
+  const gmma = gmmaState(closes);
+  if (gmma.state === 'BULL_EXPANSION') { bullScore += 2; reasons.push('GMMA bull expansion (strong uptrend)'); }
+  else if (gmma.state === 'BEAR_EXPANSION') { bearScore += 2; reasons.push('GMMA bear expansion (strong downtrend)'); }
+  else if (gmma.state === 'BULL_COMPRESSION') { bullScore += 1; reasons.push('GMMA bull (compressed — watch for breakout)'); }
+  else if (gmma.state === 'BEAR_COMPRESSION') { bearScore += 1; reasons.push('GMMA bear (compressed — watch for breakdown)'); }
+  else reasons.push('GMMA chop (no conviction)');
+  if (gmma.freshCross === 'UP') { bullScore += 1; reasons.push('GMMA fresh BULL cross (ribbons just flipped up)'); }
+  else if (gmma.freshCross === 'DOWN') { bearScore += 1; reasons.push('GMMA fresh BEAR cross (ribbons just flipped down)'); }
+
+  // 19. OI (Open Interest) analytics — what every options desk reads.
+  //     PCR + OI buildup + max-pain gravity. Index-only (no NSE chain for stocks).
+  const oi = await readOI(symbol, lastClose, prevClose);
+  if (oi.available) {
+    if (oi.bias === 'STRONG_BULL') { bullScore += 3; reasons.push(`OI: STRONG BULL (${oi.reasons.slice(0, 2).join('; ')})`); }
+    else if (oi.bias === 'BULL') { bullScore += 2; reasons.push(`OI: BULL (${oi.reasons.slice(0, 2).join('; ')})`); }
+    else if (oi.bias === 'STRONG_BEAR') { bearScore += 3; reasons.push(`OI: STRONG BEAR (${oi.reasons.slice(0, 2).join('; ')})`); }
+    else if (oi.bias === 'BEAR') { bearScore += 2; reasons.push(`OI: BEAR (${oi.reasons.slice(0, 2).join('; ')})`); }
+    else reasons.push(`OI: NEUTRAL (PCR ${oi.pcr.toFixed(2)}, ${oi.buildup.toLowerCase().replace('_', ' ')})`);
+  }
 
   // ── Determine signal ──────────────────────────────────────────────────────
   const netScore = bullScore - bearScore;
