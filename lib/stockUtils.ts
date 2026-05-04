@@ -135,7 +135,7 @@ const _gnCache: { ts: number; data: { price: number; changePercent: number; expi
   data: { price: 0, changePercent: 0 },
 };
 const GN_TTL = 30 * 1000;
-async function fetchGiftNifty() {
+export async function fetchGiftNifty() {
   if (Date.now() - _gnCache.ts < GN_TTL && _gnCache.data.price > 0) return _gnCache.data;
   try {
     const r = await fetch('https://www.nseindia.com/api/marketStatus', {
