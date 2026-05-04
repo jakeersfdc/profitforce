@@ -505,7 +505,7 @@ export default function DashboardClient() {
     };
 
     void tick();
-    const interval = setInterval(tick, 15_000);
+    const interval = setInterval(tick, 1_000);
     return () => clearInterval(interval);
   }, [openSymbolsKey]);
 
@@ -580,7 +580,7 @@ export default function DashboardClient() {
       setIndexOptions(results);
     };
     fetchIndexStrikes();
-    const interval = setInterval(fetchIndexStrikes, 30_000);
+    const interval = setInterval(fetchIndexStrikes, 1_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -801,7 +801,7 @@ export default function DashboardClient() {
       } catch { /* ignore */ }
     };
     load();
-    const t = setInterval(load, 30_000);
+    const t = setInterval(load, 1_000);
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
