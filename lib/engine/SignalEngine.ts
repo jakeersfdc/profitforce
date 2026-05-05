@@ -86,6 +86,103 @@ function gmmaState(closes: number[]): {
   return { shortAvg, longAvg, shortSpread, longSpread, state, freshCross };
 }
 
+// ── Smart Reversal Detection ──────────────────────────────────────────────
+// Detects intraday reversals with multiple patterns:
+//   • Price action reversal (broke yesterday's close, now reversing)
+//   • Indicator velocity (indicators flipping FAST = strong conviction)
+//   • Pattern confirmation (double top/bottom, support/resistance break)
+//   • Volume confirmation (breakout on expansion)
+function detectReversal(
+  closes: number[],
+  highs: number[],
+  lows: number[],
+  volumes: number[],
+  lastClose: number,
+  prevClose: number,
+  rsiLast: number | null,
+  macdVals: { macdLine: number[]; signalLine: number[]; histogram: number[] },
+  bbLast: { upper: number | null; mid: number | null; lower: number | null } | null,
+  vwapVal: number,
+  atrVal: number
+): { severity: number; isReversal: boolean; pattern: string } {
+  // severity: 0-10 scale where 10 = extremely high reversal confidence
+  let severity = 0;
+  const patterns: string[] = [];
+  const n = closes.length;
+
+  // Pattern 1: Price reversal (broke yesterday, now returning  OR broke intraday high/low)
+  const dayHigh = highs[n - 1];
+  const dayLow = lows[n - 1];
+  const didReversePriceAction = (prevClose < closes[n - 2]) && (lastClose > prevClose); // was bearish, now bullish
+  const didBearReversePriceAction = (prevClose > closes[n - 2]) && (lastClose < prevClose); // was bullish, now bearish
+
+  if (didReversePriceAction || didBearReversePriceAction) {
+    severity += 2;
+    patterns.push('price-action-reversal');
+  }
+
+  // Pattern 2: Indicator velocity (RSI changing FAST)
+  if (rsiLast !== null && closes.length >= 3) {
+    const rsiVals = rsi(closes);
+    const rsiPrev = rsiVals[n - 2];
+    const rsiCurr = rsiVals[n - 1];
+    if (rsiPrev !== null && rsiCurr !== null) {
+      const rsiChange = Math.abs(rsiCurr - rsiPrev);
+      if (rsiChange > 8) { severity += 2; patterns.push('rsi-velocity'); }
+      if ((rsiCurr > 70 && rsiPrev <= 70) || (rsiCurr < 30 && rsiPrev >= 30)) { severity += 1; patterns.push('rsi-extreme'); }
+    }
+  }
+
+  // Pattern 3: MACD divergence (histogram sign flip = trend flip)
+  if (macdVals && closes.length >= 26) {
+    const histPrev = macdVals.histogram[n - 2] ?? null;
+    const histCurr = macdVals.histogram[n - 1] ?? null;
+    if (histPrev !== null && histCurr !== null && Math.sign(histPrev) !== Math.sign(histCurr)) {
+      severity += 3;
+      patterns.push('macd-divergence');
+    }
+  }
+
+  // Pattern 4: Double top/bottom (two recent peaks/troughs within 2 ATR)
+  if (closes.length >= 5) {
+    const recentHigh = Math.max(...highs.slice(-5));
+    const recentLow = Math.min(...lows.slice(-5));
+    if (Math.abs(dayHigh - recentHigh) < atrVal * 0.3 && lastClose < recentHigh - atrVal) {
+      severity += 2;
+      patterns.push('double-top-confirmed');
+    }
+    if (Math.abs(dayLow - recentLow) < atrVal * 0.3 && lastClose > recentLow + atrVal) {
+      severity += 2;
+      patterns.push('double-bottom-confirmed');
+    }
+  }
+
+  // Pattern 5: Support/resistance (price breaking and holding)
+  if (bbLast && bbLast.lower !== null && bbLast.upper !== null) {
+    if (lastClose < bbLast.lower && closes[n - 2] >= bbLast.lower) {
+      severity += 1.5;
+      patterns.push('bb-lower-break');
+    }
+    if (lastClose > bbLast.upper && closes[n - 2] <= bbLast.upper) {
+      severity += 1.5;
+      patterns.push('bb-upper-break');
+    }
+  }
+
+  // Pattern 6: Volume confirmation (reversal on above-average volume)
+  const avgVol = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  if (volumes[n - 1] > avgVol * 1.3 && (didReversePriceAction || didBearReversePriceAction)) {
+    severity += 1;
+    patterns.push('volume-confirmed');
+  }
+
+  const isReversal = severity >= 4;
+  return { severity, isReversal, pattern: patterns.join('+') };
+}
+
+
+
+
 function rsi(closes: number[], period = 14): (number | null)[] {
   const result: (number | null)[] = [];
   let gainSum = 0, lossSum = 0;
@@ -932,49 +1029,80 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (netScore >= minConfluence) signal = 'BUY';
   else if (netScore <= -minConfluence) signal = 'SELL';
 
-  // ── PRIMARY-BIAS HARD GATE (single most important pro-trader filter) ──────
-  //    Rule a 30-year trader lives by: never trade against the higher-timeframe
-  //    trend unless the evidence is overwhelming AND the move has a confirmed
-  //    structural reversal trigger. Without it, you're trying to catch tops/
-  //    bottoms — the fastest way to bleed.
+  // ── Smart Reversal Detection (CRITICAL for catching intraday direction changes) ──
+  const rsiVals = rsi(closes);
+  const macdVals = macd(closes);
+  const bbReversalDetection = bollingerBands(closes);
+  const bbLastVal = bbReversalDetection.upper[n - 1] !== null && bbReversalDetection.lower[n - 1] !== null
+    ? { upper: bbReversalDetection.upper[n - 1], lower: bbReversalDetection.lower[n - 1], mid: bbReversalDetection.mid[n - 1] }
+    : null;
+  const reversal = detectReversal(
+    closes, highs, lows, volumes,
+    lastClose, prevClose,
+    rsiVals[n - 1] ?? null,
+    macdVals,
+    bbLastVal,
+    vwapVal, atrVal
+  );
+  reasons.push(`Reversal-Score: ${reversal.severity.toFixed(1)}/10 (${reversal.pattern})`);
+
+  // ── PRIMARY-BIAS HARD GATE (ADAPTIVE to reversal patterns) ────────────────
+  // Pro trader rule: never trade against higher-timeframe trend, BUT if there's
+  // STRONG intraday reversal patterns, the gate becomes PERMEABLE. The reversal
+  // score acts as a "proof of reversal" that bypasses the hard gate.
   if (primaryBias === "LONG_ONLY" && signal === "SELL") {
-    // Allow only with overwhelming confluence + sharp bear day + below VWAP
-    const reversalProof = netScore <= -(minConfluence + 4) && isSharpDownDay && lastClose < vwapVal;
+    // Strong reversal (severity >= 7) OR moderate reversal + negative confluence
+    const hasStrongReversal = reversal.isReversal && reversal.severity >= 7;
+    const hasModerateReversal = reversal.isReversal && reversal.severity >= 4 && netScore <= -(minConfluence + 1);
+    const reversalProof = hasStrongReversal || hasModerateReversal || (netScore <= -(minConfluence + 5) && isSharpDownDay && lastClose < vwapVal);
+    
     if (!reversalProof) {
       signal = 'HOLD';
-      reasons.push('GATE: SELL blocked — weekly trend is BULL (LONG_ONLY regime)');
+      reasons.push(`GATE: SELL blocked in BULL trend (rev-score:${reversal.severity.toFixed(1)} < threshold)`);
+    } else if (reversal.isReversal) {
+      reasons.push(`GATE OVERRIDE: Strong reversal pattern detected (${reversal.pattern})`);
     }
   }
   if (primaryBias === "SHORT_ONLY" && signal === "BUY") {
-    const reversalProof = netScore >= (minConfluence + 4) && isSharpUpDay && lastClose > vwapVal;
+    const hasStrongReversal = reversal.isReversal && reversal.severity >= 7;
+    const hasModerateReversal = reversal.isReversal && reversal.severity >= 4 && netScore >= (minConfluence + 1);
+    const reversalProof = hasStrongReversal || hasModerateReversal || (netScore >= (minConfluence + 5) && isSharpUpDay && lastClose > vwapVal);
+    
     if (!reversalProof) {
       signal = 'HOLD';
-      reasons.push('GATE: BUY blocked — weekly trend is BEAR (SHORT_ONLY regime)');
+      reasons.push(`GATE: BUY blocked in BEAR trend (rev-score:${reversal.severity.toFixed(1)} < threshold)`);
+    } else if (reversal.isReversal) {
+      reasons.push(`GATE OVERRIDE: Strong reversal pattern detected (${reversal.pattern})`);
     }
   }
-  // In NEUTRAL regime, require slightly higher confluence (no clear bias)
+  // In NEUTRAL regime, slight boost for reversals (they indicate new trend formation)
   if (primaryBias === "NEUTRAL") {
     if (signal === 'BUY' && netScore < minConfluence + 1) {
-      signal = 'HOLD';
-      reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for BUY');
+      // Allow if strong reversal from prior bearish
+      if (!(reversal.isReversal && reversal.severity >= 5)) {
+        signal = 'HOLD';
+        reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for BUY');
+      }
     }
     if (signal === 'SELL' && netScore > -(minConfluence + 1)) {
-      signal = 'HOLD';
-      reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for SELL');
+      if (!(reversal.isReversal && reversal.severity >= 5)) {
+        signal = 'HOLD';
+        reasons.push('GATE: NEUTRAL regime needs +1 extra confluence for SELL');
+      }
     }
   }
 
   // ── Counter-trend veto (expert-trader discipline) ─────────────────────────
-  // A BUY on a sharp bear day in a confirmed downtrend with strong ADX is
-  // almost always a trap. Downgrade to HOLD instead of issuing a bad signal.
+  // A BUY on a sharp bear day in confirmed downtrend is a trap UNLESS there's
+  // strong reversal evidence (not just confluence). This keeps us from chasing fakes.
   const strongTrend = adxVal > 25;
-  if (signal === 'BUY' && strongDowntrend && strongTrend && isSharpDownDay) {
+  if (signal === 'BUY' && strongDowntrend && strongTrend && isSharpDownDay && !reversal.isReversal) {
     signal = 'HOLD';
-    reasons.push('VETO: counter-trend BUY on sharp bear day in confirmed downtrend');
+    reasons.push('VETO: counter-trend BUY on sharp bear day in confirmed downtrend (no reversal pattern)');
   }
-  if (signal === 'SELL' && strongUptrend && strongTrend && isSharpUpDay) {
+  if (signal === 'SELL' && strongUptrend && strongTrend && isSharpUpDay && !reversal.isReversal) {
     signal = 'HOLD';
-    reasons.push('VETO: counter-trend SELL on sharp bull day in confirmed uptrend');
+    reasons.push('VETO: counter-trend SELL on sharp bull day in confirmed uptrend (no reversal pattern)');
   }
   // Sharp-day guard: any BUY on a sharp bear day needs overwhelming confluence
   if (signal === 'BUY' && isSharpDownDay && netScore < minConfluence + 2) {

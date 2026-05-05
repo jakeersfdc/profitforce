@@ -755,7 +755,7 @@ export type LiveStrike = {
 export async function suggestOptionStrikes(symbol: string, price?: number | null, tick?: number, pads = 2) {
   try {
     let p = price;
-    if (p == null) {
+    if (p == null || p <= 0) {
       const q = await fetchQuote(symbol);
       p = q.price || 0;
     }
@@ -770,29 +770,31 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
           const recs = data.records ?? {};
           const filt = data.filtered ?? {};
           const allData = (filt.data ?? recs.data ?? []) as Record<string, unknown>[];
-          const underlyingValue = (filt.underlyingValue ?? recs.underlyingValue ?? p) as number;
+          // Use the passed price (live quote) rather than potentially stale underlyingValue
+          const underlyingValue = p;  // CRITICAL: use live price, not API's cached value
           const expiryDates = (recs.expiryDates ?? []) as string[];
           const nearestExpiry = expiryDates[0] ?? null;
 
           if (allData.length > 0) {
-            // Sort by distance to spot to find ATM
-            const sorted = [...allData].sort(
-              (a, b) => Math.abs((a.strikePrice as number) - underlyingValue) - Math.abs((b.strikePrice as number) - underlyingValue)
+            // Get all unique strikes from chain data
+            const allStrikesSorted = [...new Set(allData.map(d => d.strikePrice as number))]
+              .filter(s => s > 0)
+              .sort((a, b) => a - b);
+
+            if (allStrikesSorted.length === 0) throw new Error('No valid strikes in chain');
+
+            // Find ATM: the strike closest to the LIVE underlying price
+            const atmStrike = allStrikesSorted.reduce((prev, curr) => 
+              Math.abs(curr - underlyingValue) < Math.abs(prev - underlyingValue) ? curr : prev
             );
 
-            // ATM is the strike closest to spot
-            const atmStrike = sorted[0]?.strikePrice as number ?? Math.round(underlyingValue / 50) * 50;
-
-            // Pick `pads` strikes above and below ATM
-            const allStrikesSorted = [...allData]
-              .map(d => d.strikePrice as number)
-              .sort((a, b) => a - b);
+            // Pick `pads` strikes above and below ATM (symmetrically)
             const atmIdx = allStrikesSorted.indexOf(atmStrike);
             const fromIdx = Math.max(0, atmIdx - pads);
             const toIdx = Math.min(allStrikesSorted.length - 1, atmIdx + pads);
             const selectedStrikes = allStrikesSorted.slice(fromIdx, toIdx + 1);
 
-            // Build lookup
+            // Build lookup from chain data
             const strikeMap = new Map<number, Record<string, unknown>>();
             for (const d of allData) strikeMap.set(d.strikePrice as number, d);
 
