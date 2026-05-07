@@ -15,6 +15,8 @@ type Signal = {
   confidence?: number;
   reason: string;
   fnoRecommendation?: { type: string; strike?: number | null; reason?: string } | null;
+  strongSupport?: Array<{level: number; confidence: number; touches: number; age: number}>;
+  strongResistance?: Array<{level: number; confidence: number; touches: number; age: number}>;
 };
 
 type StrikesData = {
@@ -187,6 +189,33 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
       <div className="text-xs text-[var(--bf-muted)] border-t border-white/5 pt-2">
         <span className="font-semibold">Reason:</span> {parentSignal.reason}
       </div>
+
+      {/* Strong Institutional S/R Levels */}
+      {((parentSignal.strongSupport as any)?.length > 0 || (parentSignal.strongResistance as any)?.length > 0) && (
+        <div className="text-xs text-white/70 border-t border-white/5 pt-2 mt-2 space-y-1">
+          <div className="font-semibold text-[var(--bf-accent-blue)]">💪 Institutional Levels (1+ Month):</div>
+          {(parentSignal.strongSupport as any)?.length > 0 && (
+            <div className="pl-3">
+              <div className="text-[#22c55e]">Support:</div>
+              {parentSignal.strongSupport!.slice(0, 3).map((s: any, i: number) => (
+                <div key={i} className="ml-2 text-xs text-[#10b981]">
+                  ₹{s.level.toFixed(2)} • {s.touches} touches • {s.confidence}% strength
+                </div>
+              ))}
+            </div>
+          )}
+          {(parentSignal.strongResistance as any)?.length > 0 && (
+            <div className="pl-3">
+              <div className="text-[#ef4444]">Resistance:</div>
+              {parentSignal.strongResistance!.slice(0, 3).map((r: any, i: number) => (
+                <div key={i} className="ml-2 text-xs text-[#f87171]">
+                  ₹{r.level.toFixed(2)} • {r.touches} touches • {r.confidence}% strength
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
