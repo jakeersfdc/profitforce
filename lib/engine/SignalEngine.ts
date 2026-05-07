@@ -549,6 +549,88 @@ function findSupportResistance(
   };
 }
 
+// ── STRONG Support & Resistance (1+ Month Holds) ────────────────────────────
+// Identifies price levels that have acted as support/resistance for 20+ days
+// without being broken. These are INSTITUTIONAL levels traders respect.
+function findStrongSupportResistance(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  volumes: number[],
+  price: number
+): { strongSupport: Array<{level: number; confidence: number; touches: number; age: number}>; strongResistance: Array<{level: number; confidence: number; touches: number; age: number}> } {
+  const n = closes.length;
+  const lookback = Math.min(n, 120); // 6 months of daily data
+  const dataWindow = {
+    highs: highs.slice(-lookback),
+    lows: lows.slice(-lookback),
+    closes: closes.slice(-lookback),
+    volumes: volumes.slice(-lookback),
+  };
+  const m = dataWindow.closes.length;
+
+  // Identify price levels by clustering highs/lows within 0.5% (same level trades at slightly different prices)
+  const clusters: Map<string, { level: number; indices: number[]; isHigh: boolean; volume: number }> = new Map();
+  
+  for (let i = 0; i < m; i++) {
+    const key_high = Math.round(dataWindow.highs[i] * 1000).toString();
+    const key_low = Math.round(dataWindow.lows[i] * 1000).toString();
+    const vol = dataWindow.volumes[i];
+
+    if (!clusters.has(key_high)) {
+      clusters.set(key_high, { level: dataWindow.highs[i], indices: [], isHigh: true, volume: 0 });
+    }
+    clusters.get(key_high)!.indices.push(i);
+    clusters.get(key_high)!.volume += vol;
+
+    if (!clusters.has(key_low)) {
+      clusters.set(key_low, { level: dataWindow.lows[i], indices: [], isHigh: false, volume: 0 });
+    }
+    clusters.get(key_low)!.indices.push(i);
+    clusters.get(key_low)!.volume += vol;
+  }
+
+  // Score each cluster by: age (older = stronger), touches (more touches = stronger), volume
+  const scoreCluster = (c: {level: number; indices: number[]; isHigh: boolean; volume: number}): number => {
+    const age = Math.max(...c.indices);  // most recent touch index
+    const daysAgo = m - age;
+    const ageScore = Math.max(0, 20 - daysAgo) / 20;  // max score if 20+ days old
+    const touchScore = Math.min(c.indices.length / 5, 1.0);  // normalized touch count
+    const volumeNorm = c.volume / (dataWindow.volumes.reduce((a,b)=>a+b,0) / m);
+    return (ageScore * 0.4 + touchScore * 0.4 + Math.min(volumeNorm, 1.0) * 0.2);
+  };
+
+  // Build support + resistance lists
+  const supports: Array<{level: number; confidence: number; touches: number; age: number}> = [];
+  const resistances: Array<{level: number; confidence: number; touches: number; age: number}> = [];
+
+  for (const [_, cluster] of clusters) {
+    if (cluster.indices.length < 1) continue;
+    
+    const isStrong = cluster.indices.length >= 2 && Math.max(...cluster.indices) >= m - 20;  // tested within last 20 days AND multiple touches
+    if (!isStrong) continue;
+
+    const confidence = scoreCluster(cluster);
+    const touches = cluster.indices.length;
+    const age = m - Math.max(...cluster.indices);
+
+    if (cluster.level < price * 0.995) {
+      supports.push({ level: cluster.level, confidence, touches, age });
+    } else if (cluster.level > price * 1.005) {
+      resistances.push({ level: cluster.level, confidence, touches, age });
+    }
+  }
+
+  // Sort by confidence (strongest first) and limit to top 5 each
+  supports.sort((a, b) => b.confidence - a.confidence);
+  resistances.sort((a, b) => b.confidence - a.confidence);
+
+  return {
+    strongSupport: supports.slice(0, 5),
+    strongResistance: resistances.slice(0, 5),
+  };
+}
+
 export interface Signal {
   symbol: string;
   signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD';
@@ -562,6 +644,8 @@ export interface Signal {
   indicators: Record<string, any>;
   timestamp: string;
   fnoRecommendation?: FnORecommendation | null;
+  strongSupport?: Array<{level: number; confidence: number; touches: number; age: number}>;
+  strongResistance?: Array<{level: number; confidence: number; touches: number; age: number}>;
 }
 
 export interface FnORecommendation {
@@ -687,6 +771,11 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const { pivots, fibs, resistanceLevels, supportLevels } = sr;
   const nearestResistance = resistanceLevels[0] ?? null;
   const nearestSupport = supportLevels[0] ?? null;
+
+  // ── STRONG Support & Resistance (1+ Month Institutional Levels) ───────────
+  const strongSR = findStrongSupportResistance(highs, lows, closes, volumes, lastClose);
+  const strongestSupport = strongSR.strongSupport[0] ?? null;
+  const strongestResistance = strongSR.strongResistance[0] ?? null;
 
   // ── Primary trend context (expert-trader filter) ──────────────────────────
   // A professional technician never buys oversold in a confirmed downtrend
@@ -1230,10 +1319,18 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   }
 
   // Build S/R level strings for display
-  const supportStr = supportLevels.slice(0, 3).map(l => `₹${round(l)}`).join(' / ') || '—';
+   const supportStr = supportLevels.slice(0, 3).map(l => `₹${round(l)}`).join(' / ') || '—';
   const resistanceStr = resistanceLevels.slice(0, 3).map(l => `₹${round(l)}`).join(' / ') || '—';
   reasons.push(`S: ${supportStr}`);
   reasons.push(`R: ${resistanceStr}`);
+
+  // Add strong institutional S/R to reasons
+  if (strongestSupport) {
+    reasons.push(`💪 STRONG Support: ₹${round(strongestSupport.level)} (${strongestSupport.touches} touches, ${strongestSupport.age}d old, ${Math.round(strongestSupport.confidence * 100)}% confidence)`);
+  }
+  if (strongestResistance) {
+    reasons.push(`💪 STRONG Resistance: ₹${round(strongestResistance.level)} (${strongestResistance.touches} touches, ${strongestResistance.age}d old, ${Math.round(strongestResistance.confidence * 100)}% confidence)`);
+  }
 
   return {
     symbol,
@@ -1256,6 +1353,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
       s1: round(pivots.s1), s2: round(pivots.s2), s3: round(pivots.s3),
       supportLevels: supportLevels.map(round),
       resistanceLevels: resistanceLevels.map(round),
+      strongSupport: strongSR.strongSupport.map(s => ({ level: round(s.level), confidence: Math.round(s.confidence * 100), touches: s.touches, age: s.age })),
+      strongResistance: strongSR.strongResistance.map(r => ({ level: round(r.level), confidence: Math.round(r.confidence * 100), touches: r.touches, age: r.age })),
       fibRetracement: {
         fib236: round(fibs.fib236), fib382: round(fibs.fib382), fib500: round(fibs.fib500),
         fib618: round(fibs.fib618), fib786: round(fibs.fib786),
@@ -1277,6 +1376,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     },
     timestamp: new Date().toISOString(),
     fnoRecommendation: fnoRec,
+    strongSupport: strongSR.strongSupport,
+    strongResistance: strongSR.strongResistance,
   };
 }
 
