@@ -182,7 +182,8 @@ export async function calculateAISignal(symbol: string) {
       if (closes.length < period + 1) return 50;
       let gains = 0;
       let losses = 0;
-      for (let i = closes.length - period; i < closes.length; i++) {
+      const start = closes.length - period;
+      for (let i = start; i < closes.length; i++) {
         const d = closes[i] - closes[i - 1];
         if (d > 0) gains += d;
         else losses -= d;
@@ -214,8 +215,8 @@ export async function calculateAISignal(symbol: string) {
     const ema9 = ema9Arr[ema9Arr.length - 1];
     const ema21 = ema21Arr[ema21Arr.length - 1];
     const rsi9 = calcRSI(closes, 9);
-    const rocPast = closes[closes.length - 4];
-    const roc3 = rocPast ? ((lastClose - rocPast) / rocPast) * 100 : 0;
+    const close3BarsAgo = closes[closes.length - 4];
+    const roc3 = close3BarsAgo ? ((lastClose - close3BarsAgo) / close3BarsAgo) * 100 : 0;
 
     const buySignal = ema9 > ema21 && rsi9 >= 45 && rsi9 <= 70 && roc3 > 0;
     const sellSignal = ema9 < ema21 && rsi9 >= 30 && rsi9 <= 55 && roc3 < 0;

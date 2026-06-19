@@ -221,7 +221,8 @@ function stochasticRSI(
   smoothK = 3,
   smoothD = 3
 ): { k: number; d: number; prevK: number; prevD: number } {
-  const rsiValues = rsi(closes, rsiPeriod).filter(v => v !== null) as number[];
+  const isNumber = (v: number | null): v is number => typeof v === 'number';
+  const rsiValues = rsi(closes, rsiPeriod).filter(isNumber);
   if (rsiValues.length < stochPeriod) return { k: 50, d: 50, prevK: 50, prevD: 50 };
 
   const rawK: number[] = [];
@@ -1269,6 +1270,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   else { bearScore += 1; reasons.push('Ichimoku: Chikou below price 26 bars ago'); }
 
   // 22. ROC — momentum confirmation
+  const lowMomentumThreshold = 0.2;
   const rocAbs = Math.abs(rocVal);
   if (rocVal > 1.5) {
     bullScore += 2;
@@ -1284,8 +1286,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     reasons.push(`ROC bear momentum (${rocVal.toFixed(2)}%)`);
   } else {
     reasons.push(`ROC flat (${rocVal.toFixed(2)}%) — low momentum`);
-    if (bullScore > bearScore && rocAbs < 0.2) bullScore -= 1;
-    if (bearScore > bullScore && rocAbs < 0.2) bearScore -= 1;
+    if (bullScore > bearScore && rocAbs < lowMomentumThreshold) bullScore -= 1;
+    if (bearScore > bullScore && rocAbs < lowMomentumThreshold) bearScore -= 1;
   }
 
   // ── Determine signal ──────────────────────────────────────────────────────
