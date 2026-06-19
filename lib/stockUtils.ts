@@ -55,7 +55,7 @@ const _indiaVixCache: { ts: number; value: number | null } = { ts: 0, value: nul
 
 export type VixRegime = 'VERY_LOW' | 'LOW' | 'NORMAL' | 'HIGH' | 'VERY_HIGH' | 'CRISIS';
 
-function classifyVixRegime(vix: number): VixRegime {
+export function classifyVixRegime(vix: number): VixRegime {
   if (vix < 12) return 'VERY_LOW';
   if (vix < 16) return 'LOW';
   if (vix < 20) return 'NORMAL';
@@ -120,7 +120,7 @@ export async function fetchQuote(symbol: string) {
     _quoteCache.set(symbol, { ts: Date.now(), data: result });
     return result;
   } catch (error) {
-    console.error(`Quote error for ${symbol}:`, error);
+    console.error('Quote error for symbol', symbol, error);
     // On error (e.g. 429), return last known good value instead of zeros
     if (cached) return cached.data;
     return { symbol, price: 0, changePercent: 0 };
@@ -845,7 +845,7 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
       ? providedVix
       : await fetchIndiaVIX();
     const vixRegime = classifyVixRegime(resolvedVix);
-    const resolvedPads = Number.isFinite(providedVix) && providedVix > 0
+    const resolvedPads = Number.isFinite(resolvedVix) && resolvedVix > 0
       ? padsFromVix(resolvedVix)
       : pads;
 

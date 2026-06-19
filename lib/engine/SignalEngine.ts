@@ -8,7 +8,7 @@
  * Each signal includes: entry, stop-loss, target, trailing-stop, confidence score.
  */
 
-import { getHistorical, fetchQuote, suggestOptionStrikes } from '../stockUtils';
+import { getHistorical, fetchQuote, suggestOptionStrikes, classifyVixRegime } from '../stockUtils';
 import { readOI } from './oiAnalysis';
 import { buildVolumeProfile } from './volumeProfile';
 
@@ -1374,17 +1374,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const strength = Math.min(100, Math.round((Math.abs(netScore) / Math.max(totalVotes, 1)) * 100));
   const confidence = Math.min(1.0, Math.abs(netScore) / 10);
   const currentVIX = await indiaVixPromise;
-  const vixRegime = currentVIX < 12
-    ? 'VERY_LOW'
-    : currentVIX < 16
-      ? 'LOW'
-      : currentVIX < 20
-        ? 'NORMAL'
-        : currentVIX < 25
-          ? 'HIGH'
-          : currentVIX < 30
-            ? 'VERY_HIGH'
-            : 'CRISIS';
+  const vixRegime = classifyVixRegime(currentVIX);
 
   // ── F&O recommendation ────────────────────────────────────────────────────
   let fnoRec: FnORecommendation | null = null;
@@ -1424,6 +1414,32 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (strongestResistance) {
     reasons.push(`💪 STRONG Resistance: ₹${round(strongestResistance.level)} (${strongestResistance.touches} touches, ${strongestResistance.age}d old, ${Math.round(strongestResistance.confidence * 100)}% confidence)`);
   }
+
+  const noTradeZoneReason = inNoTradeZone
+    ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} — choppy zone`
+    : 'Not in No-Trade Zone';
+  const noTradeZoneData = {
+    active: inNoTradeZone,
+    s1: pivots.s1,
+    r1: pivots.r1,
+    pp: pivots.pp,
+    reason: noTradeZoneReason
+  };
+  const noTradeZoneIndicator = {
+    active: inNoTradeZone,
+    s1: round(pivots.s1),
+    r1: round(pivots.r1),
+    pp: round(pivots.pp),
+    reason: noTradeZoneReason
+  };
+  const volumeProfileData = {
+    poc: round(vp.poc),
+    vah: round(vp.vah),
+    val: round(vp.val),
+    aboveValueArea: vp.aboveValueArea,
+    belowValueArea: vp.belowValueArea,
+    atPOC: vp.atPOC,
+  };
 
   return {
     symbol,
@@ -1466,23 +1482,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
             sqResistance: round(sq9.sqResistance),
           }
         : null,
-      volumeProfile: {
-        poc: round(vp.poc),
-        vah: round(vp.vah),
-        val: round(vp.val),
-        aboveValueArea: vp.aboveValueArea,
-        belowValueArea: vp.belowValueArea,
-        atPOC: vp.atPOC,
-      },
-      noTradeZone: {
-        active: inNoTradeZone,
-        s1: round(pivots.s1),
-        r1: round(pivots.r1),
-        pp: round(pivots.pp),
-        reason: inNoTradeZone
-          ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} — choppy zone`
-          : 'Not in No-Trade Zone'
-      },
+      volumeProfile: volumeProfileData,
+      noTradeZone: noTradeZoneIndicator,
       indiaVIX: round(currentVIX),
       vixRegime,
     },
@@ -1490,23 +1491,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     fnoRecommendation: fnoRec,
     strongSupport: strongSR.strongSupport,
     strongResistance: strongSR.strongResistance,
-    noTradeZone: {
-      active: inNoTradeZone,
-      s1: pivots.s1,
-      r1: pivots.r1,
-      pp: pivots.pp,
-      reason: inNoTradeZone
-        ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} — choppy zone`
-        : 'Not in No-Trade Zone'
-    },
-    volumeProfile: {
-      poc: round(vp.poc),
-      vah: round(vp.vah),
-      val: round(vp.val),
-      aboveValueArea: vp.aboveValueArea,
-      belowValueArea: vp.belowValueArea,
-      atPOC: vp.atPOC,
-    },
+    noTradeZone: noTradeZoneData,
+    volumeProfile: volumeProfileData,
     vix: currentVIX,
     vixRegime,
   };
