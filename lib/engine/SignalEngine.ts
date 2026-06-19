@@ -12,6 +12,9 @@ import { getHistorical, fetchQuote, suggestOptionStrikes, classifyVixRegime } fr
 import { readOI } from './oiAnalysis';
 import { buildVolumeProfile } from './volumeProfile';
 
+const NO_TRADE_ZONE_PIVOT_TOLERANCE = 0.003; // 0.3% proximity to PP qualifies as NTZ chop
+const NTZ_EXTRA_CONFLUENCE = 2; // additional confluence needed to trade inside NTZ
+
 // ── Indicator helpers ─────────────────────────────────────────────────────────
 
 function ema(values: number[], period: number): number[] {
@@ -806,7 +809,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const inNoTradeZone = (
     lastClose >= pivots.s1 &&
     lastClose <= pivots.r1 &&
-    Math.abs(lastClose - pivots.pp) / pivots.pp < 0.003 &&
+    Math.abs(lastClose - pivots.pp) / pivots.pp < NO_TRADE_ZONE_PIVOT_TOLERANCE &&
     adxVal < 20
   );
   const nearestResistance = resistanceLevels[0] ?? null;
@@ -1301,7 +1304,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
 
   // NTZ VETO: In choppy/pivot zone, require elevated confluence
   if (inNoTradeZone && signal !== 'HOLD') {
-    if (Math.abs(netScore) < minConfluence + 2) {
+    if (Math.abs(netScore) < minConfluence + NTZ_EXTRA_CONFLUENCE) {
       signal = 'HOLD';
       reasons.push(`NTZ: No-Trade Zone (S1:₹${round(pivots.s1)}–R1:₹${round(pivots.r1)}, ADX:${adxVal.toFixed(1)}) — elevated confluence required`);
     } else {

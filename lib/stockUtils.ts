@@ -128,7 +128,7 @@ export async function fetchQuote(symbol: string) {
 }
 
 export async function fetchIndiaVIX(): Promise<number> {
-  if (_indiaVixCache.value && Date.now() - _indiaVixCache.ts < INDIA_VIX_TTL) return _indiaVixCache.value;
+  if (_indiaVixCache.value !== null && Date.now() - _indiaVixCache.ts < INDIA_VIX_TTL) return _indiaVixCache.value;
 
   try {
     const quote = await fetchQuote('^INDIAVIX');

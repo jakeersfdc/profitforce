@@ -126,7 +126,7 @@ export function buildVolumeProfile(
   const vah = minPrice + (highVaIndex + 1) * bucketSize;
 
   const near = (price: number, level: number, pct: number) =>
-    level > 0 && Math.abs(price - level) / level <= pct;
+    level !== 0 && Math.abs(price - level) / Math.abs(level) <= pct;
 
   return {
     poc,

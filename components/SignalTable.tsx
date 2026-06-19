@@ -271,7 +271,7 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
       </div>
 
       {/* Strong Institutional S/R Levels */}
-      {((parentSignal.strongSupport as any)?.length > 0 || (parentSignal.strongResistance as any)?.length > 0) && (
+      {((parentSignal.strongSupport?.length ?? 0) > 0 || (parentSignal.strongResistance?.length ?? 0) > 0) && (
         <div className="text-xs text-white/70 border-t border-white/5 pt-2 mt-2 space-y-1">
           <div className="font-semibold text-[var(--bf-accent-blue)]">💪 Institutional Levels (1+ Month):</div>
           {(parentSignal.strongSupport as any)?.length > 0 && (
