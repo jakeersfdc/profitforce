@@ -50,6 +50,49 @@ const HIST_CACHE_TTL = 60 * 1000; // 60s (was 5m — caused stale predictions)
 // Quote cache (10s TTL — Yahoo rate-limits aggressively at sub-second polling)
 const _quoteCache: Map<string, { ts: number; data: any }> = new Map();
 const QUOTE_CACHE_TTL = 10 * 1000;
+const INDIA_VIX_TTL = 60 * 1000;
+const _indiaVixCache: { ts: number; value: number | null } = { ts: 0, value: null };
+
+export type VixRegime = 'VERY_LOW' | 'LOW' | 'NORMAL' | 'HIGH' | 'VERY_HIGH' | 'CRISIS';
+
+export function classifyVixRegime(vix: number): VixRegime {
+  if (vix < 12) return 'VERY_LOW';
+  if (vix < 16) return 'LOW';
+  if (vix < 20) return 'NORMAL';
+  if (vix < 25) return 'HIGH';
+  if (vix < 30) return 'VERY_HIGH';
+  return 'CRISIS';
+}
+
+function padsFromVix(vix: number): number {
+  if (vix < 12) return 1;
+  if (vix < 16) return 2;
+  if (vix < 20) return 3;
+  if (vix < 25) return 4;
+  return 5;
+}
+
+function extractVixValue(payload: unknown): number | null {
+  if (payload == null) return null;
+  if (typeof payload !== 'object') return null;
+  const root = payload as Record<string, unknown>;
+  if (root.vixValue != null) {
+    const candidate = Number(root.vixValue);
+    if (Number.isFinite(candidate) && candidate > 0) return candidate;
+  }
+  for (const value of Object.values(root)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const parsed = extractVixValue(item);
+        if (parsed != null) return parsed;
+      }
+      continue;
+    }
+    const parsed = extractVixValue(value);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
 
 export async function fetchQuote(symbol: string) {
   const cached = _quoteCache.get(symbol);
@@ -77,11 +120,54 @@ export async function fetchQuote(symbol: string) {
     _quoteCache.set(symbol, { ts: Date.now(), data: result });
     return result;
   } catch (error) {
-    console.error(`Quote error for ${symbol}:`, error);
+    console.error('Quote error for symbol', symbol, error);
     // On error (e.g. 429), return last known good value instead of zeros
     if (cached) return cached.data;
     return { symbol, price: 0, changePercent: 0 };
   }
+}
+
+export async function fetchIndiaVIX(): Promise<number> {
+  if (_indiaVixCache.value !== null && Date.now() - _indiaVixCache.ts < INDIA_VIX_TTL) return _indiaVixCache.value;
+
+  try {
+    const quote = await fetchQuote('^INDIAVIX');
+    const vix = Number(quote?.price ?? 0);
+    if (Number.isFinite(vix) && vix > 0) {
+      _indiaVixCache.ts = Date.now();
+      _indiaVixCache.value = vix;
+      return vix;
+    }
+  } catch (err) {
+    console.warn('[fetchIndiaVIX] yahoo fallback', err);
+  }
+
+  try {
+    const r = await fetch('https://www.nseindia.com/api/marketStatus', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.nseindia.com/',
+      },
+      cache: 'no-store',
+    });
+    if (r.ok) {
+      const payload: unknown = await r.json();
+      const vixFromNse = extractVixValue(payload);
+      if (vixFromNse != null) {
+        _indiaVixCache.ts = Date.now();
+        _indiaVixCache.value = vixFromNse;
+        return vixFromNse;
+      }
+    }
+  } catch (err) {
+    console.warn('[fetchIndiaVIX] nse fallback', err);
+  }
+
+  _indiaVixCache.ts = Date.now();
+  _indiaVixCache.value = 15;
+  return 15;
 }
 
 export async function getIndexPrices() {
@@ -752,8 +838,17 @@ export type LiveStrike = {
   isATM: boolean;
 };
 
-export async function suggestOptionStrikes(symbol: string, price?: number | null, tick?: number, pads = 2) {
+export async function suggestOptionStrikes(symbol: string, price?: number | null, tick?: number, pads = 2, vix?: number) {
   try {
+    const providedVix = Number(vix);
+    const resolvedVix = Number.isFinite(providedVix) && providedVix > 0
+      ? providedVix
+      : await fetchIndiaVIX();
+    const vixRegime = classifyVixRegime(resolvedVix);
+    const resolvedPads = Number.isFinite(resolvedVix) && resolvedVix > 0
+      ? padsFromVix(resolvedVix)
+      : pads;
+
     let p = price;
     if (p == null || p <= 0) {
       const q = await fetchQuote(symbol);
@@ -790,8 +885,8 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
 
             // Pick `pads` strikes above and below ATM (symmetrically)
             const atmIdx = allStrikesSorted.indexOf(atmStrike);
-            const fromIdx = Math.max(0, atmIdx - pads);
-            const toIdx = Math.min(allStrikesSorted.length - 1, atmIdx + pads);
+            const fromIdx = Math.max(0, atmIdx - resolvedPads);
+            const toIdx = Math.min(allStrikesSorted.length - 1, atmIdx + resolvedPads);
             const selectedStrikes = allStrikesSorted.slice(fromIdx, toIdx + 1);
 
             // Build lookup from chain data
@@ -846,6 +941,8 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
               daysToExpiry,
               iv: Math.round(avgIV * 100) / 100,
               live: true,
+              vix: Number(resolvedVix.toFixed(2)),
+              vixRegime,
             };
           }
         }
@@ -859,7 +956,7 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
     const resolvedTick = tick ?? TICK_MAP[symbol] ?? (isIdx ? 50 : stockStrikeStep(p));
     const atm = Math.round(p / resolvedTick) * resolvedTick;
     const strikes: number[] = [];
-    for (let i = -pads; i <= pads; i++) strikes.push(Math.round((atm + i * resolvedTick) * 100) / 100);
+    for (let i = -resolvedPads; i <= resolvedPads; i++) strikes.push(Math.round((atm + i * resolvedTick) * 100) / 100);
 
     // Calculate nearest expiry via centralised resolver:
     //  • NSE indices  → weekly Tuesday
@@ -901,7 +998,20 @@ export async function suggestOptionStrikes(symbol: string, price?: number | null
       };
     });
 
-    return { symbol, price: Number(p.toFixed(2)), atm, tick: resolvedTick, strikes, liveStrikes: estLiveStrikes, expiry: expiryStr, daysToExpiry: dte, iv: 15, live: false };
+    return {
+      symbol,
+      price: Number(p.toFixed(2)),
+      atm,
+      tick: resolvedTick,
+      strikes,
+      liveStrikes: estLiveStrikes,
+      expiry: expiryStr,
+      daysToExpiry: dte,
+      iv: 15,
+      live: false,
+      vix: Number(resolvedVix.toFixed(2)),
+      vixRegime,
+    };
   } catch (e) {
     console.error('suggestOptionStrikes error', e);
     return { error: String(e) };

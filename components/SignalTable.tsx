@@ -14,9 +14,14 @@ type Signal = {
   strength: number;
   confidence?: number;
   reason: string;
+  indicators?: Record<string, unknown>;
   fnoRecommendation?: { type: string; strike?: number | null; reason?: string } | null;
   strongSupport?: Array<{level: number; confidence: number; touches: number; age: number}>;
   strongResistance?: Array<{level: number; confidence: number; touches: number; age: number}>;
+  noTradeZone?: { active: boolean; s1: number; r1: number; pp: number; reason: string };
+  volumeProfile?: { poc: number; vah: number; val: number; aboveValueArea: boolean; belowValueArea: boolean; atPOC: boolean };
+  vix?: number;
+  vixRegime?: string;
 };
 
 type StrikesData = {
@@ -36,6 +41,41 @@ function SignalPill({ signal }: { signal: Signal["signal"] }) {
   return <span className={`px-2 py-1 text-xs rounded-md font-semibold ${map[signal] ?? 'bg-gray-500 text-white'}`}>{signal}</span>;
 }
 
+function asNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function vixBadgeClass(regime?: string): string {
+  switch (regime) {
+    case 'VERY_LOW': return 'bg-emerald-900 text-emerald-300';
+    case 'LOW': return 'bg-lime-900 text-lime-300';
+    case 'NORMAL': return 'bg-sky-900 text-sky-300';
+    case 'HIGH': return 'bg-amber-900 text-amber-300';
+    case 'VERY_HIGH': return 'bg-orange-900 text-orange-300';
+    case 'CRISIS': return 'bg-rose-900 text-rose-300';
+    default: return 'bg-gray-700 text-gray-200';
+  }
+}
+
+function pivotZone(signal: Signal): { label: string; className: string } | null {
+  const price = signal.currentPrice ?? signal.entryPrice ?? null;
+  if (price == null) return null;
+  const i = signal.indicators ?? {};
+  const r2 = asNumber(i.r2);
+  const r1 = asNumber(i.r1);
+  const pp = asNumber(i.pivot);
+  const s1 = asNumber(i.s1);
+  const s2 = asNumber(i.s2);
+  if (r2 == null || r1 == null || pp == null || s1 == null || s2 == null) return null;
+  if (price >= r2) return { label: 'Above R2', className: 'bg-rose-900 text-rose-300' };
+  if (price >= r1) return { label: 'R1-R2', className: 'bg-orange-900 text-orange-300' };
+  if (price > pp) return { label: 'PP-R1', className: 'bg-white/10 text-white' };
+  if (price > s1) return { label: 'S1-PP', className: 'bg-white/10 text-white' };
+  if (price >= s2) return { label: 'S2-S1', className: 'bg-sky-900 text-sky-300' };
+  return { label: 'Below S2', className: 'bg-blue-950 text-blue-200' };
+}
+
 function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesData; parentSignal: Signal }) {
   const { strikes, recommendation } = strikesData;
   const strikesList = strikes?.strikes ?? [];
@@ -52,6 +92,20 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
   const stopP = Number(parentSignal.stopLoss ?? 0);
   const targetP = Number(parentSignal.targetPrice ?? 0);
   const atr = entryP && stopP ? Math.abs(entryP - stopP) / 1.5 : tick; // reverse-engineer ATR from stop
+  const indicators = parentSignal.indicators ?? {};
+  const fallbackVp = indicators.volumeProfile as Signal['volumeProfile'] | undefined;
+  const vp = parentSignal.volumeProfile ?? fallbackVp;
+  const zone = pivotZone(parentSignal);
+  const vix = parentSignal.vix ?? asNumber(indicators.indiaVIX ?? indicators.vix) ?? null;
+  const vixRegime = parentSignal.vixRegime ?? String(indicators.vixRegime ?? '');
+  const ntz = parentSignal.noTradeZone;
+  const vpTone = vp?.atPOC
+    ? 'text-amber-300'
+    : vp?.aboveValueArea
+      ? 'text-emerald-300'
+      : vp?.belowValueArea
+        ? 'text-rose-300'
+        : 'text-white';
 
   return (
     <div className="bg-[#0b1628] border border-white/10 rounded-lg p-4 space-y-3">
@@ -190,8 +244,34 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
         <span className="font-semibold">Reason:</span> {parentSignal.reason}
       </div>
 
+      <div className="text-xs border-t border-white/5 pt-2 space-y-1">
+        {vp && (
+          <div className={`${vpTone}`}>
+            <span className="font-semibold">Volume Profile:</span>{' '}
+            POC ₹{vp.poc.toFixed(2)} · VAH ₹{vp.vah.toFixed(2)} · VAL ₹{vp.val.toFixed(2)}
+          </div>
+        )}
+        {zone && (
+          <div>
+            <span className="font-semibold text-[var(--bf-muted)]">Pivot Zone:</span>{' '}
+            <span className={`px-2 py-0.5 rounded ${zone.className}`}>{zone.label}</span>
+          </div>
+        )}
+        {vix != null && (
+          <div>
+            <span className="font-semibold text-[var(--bf-muted)]">India VIX:</span>{' '}
+            <span className={`px-2 py-0.5 rounded ${vixBadgeClass(vixRegime)}`}>{vix.toFixed(2)} {vixRegime || ''}</span>
+          </div>
+        )}
+        {ntz?.active && (
+          <div className="text-orange-300">
+            <span className="font-semibold">⚠️ NTZ:</span> {ntz.reason}
+          </div>
+        )}
+      </div>
+
       {/* Strong Institutional S/R Levels */}
-      {((parentSignal.strongSupport as any)?.length > 0 || (parentSignal.strongResistance as any)?.length > 0) && (
+      {((parentSignal.strongSupport?.length ?? 0) > 0 || (parentSignal.strongResistance?.length ?? 0) > 0) && (
         <div className="text-xs text-white/70 border-t border-white/5 pt-2 mt-2 space-y-1">
           <div className="font-semibold text-[var(--bf-accent-blue)]">💪 Institutional Levels (1+ Month):</div>
           {(parentSignal.strongSupport as any)?.length > 0 && (
@@ -279,6 +359,9 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
           <tbody className="bg-transparent divide-y divide-white/6">
             {data.map((row, idx) => {
               const isExpanded = expandedSymbol === row.symbol;
+              const zone = pivotZone(row);
+              const vix = row.vix ?? asNumber(row.indicators?.indiaVIX ?? row.indicators?.vix);
+              const vixRegime = row.vixRegime ?? String(row.indicators?.vixRegime ?? '');
               return (
                 <React.Fragment key={`${row.symbol}-${idx}`}>
                   <tr onClick={() => toggleExpand(row)} className={`hover:bg-white/2 cursor-pointer transition-colors ${isExpanded ? 'bg-white/5' : ''}`}>
@@ -290,7 +373,14 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
                       <div className="text-xs text-[var(--bf-muted)]">{row.name}</div>
                     </td>
                     <td className="px-4 py-3 text-right font-semibold">{row.currentPrice != null ? Number(row.currentPrice).toFixed(2) : '—'}</td>
-                    <td className="px-4 py-3 text-center"><SignalPill signal={row.signal} /></td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="flex flex-col items-center gap-1">
+                        <SignalPill signal={row.signal} />
+                        {row.noTradeZone?.active && <span className="px-2 py-0.5 rounded text-[10px] bg-orange-900 text-orange-300">⚠️ NTZ</span>}
+                        {zone && <span className={`px-2 py-0.5 rounded text-[10px] ${zone.className}`}>{zone.label}</span>}
+                        {vix != null && <span className={`px-2 py-0.5 rounded text-[10px] ${vixBadgeClass(vixRegime)}`}>VIX {vix.toFixed(1)} {vixRegime}</span>}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-right font-medium text-emerald-400">{row.entryPrice != null ? Number(row.entryPrice).toFixed(2) : '—'}</td>
                     <td className="px-4 py-3 text-right font-medium text-rose-400">{row.stopLoss != null ? Number(row.stopLoss).toFixed(2) : '—'}</td>
                     <td className="px-4 py-3 text-right font-medium text-sky-400">{row.targetPrice != null ? Number(row.targetPrice).toFixed(2) : '—'}</td>
@@ -340,6 +430,9 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
       <div className="md:hidden space-y-3 p-2">
         {data.map((row, idx) => {
           const isExpanded = expandedSymbol === row.symbol;
+          const zone = pivotZone(row);
+          const vix = row.vix ?? asNumber(row.indicators?.indiaVIX ?? row.indicators?.vix);
+          const vixRegime = row.vixRegime ?? String(row.indicators?.vixRegime ?? '');
           return (
             <div key={`${row.symbol}-${idx}`} className="rounded-md bg-white/3 border border-white/6 overflow-hidden">
               <div onClick={() => toggleExpand(row)} className={`p-3 cursor-pointer ${isExpanded ? 'bg-white/5' : ''}`}>
@@ -368,7 +461,12 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
                   </div>
                   <div className="text-right">
                     <div className="font-semibold">{row.currentPrice != null ? Number(row.currentPrice).toFixed(2) : '0.00'}</div>
-                    <div className="mt-2 text-right"><SignalPill signal={row.signal} /></div>
+                    <div className="mt-2 text-right flex flex-col items-end gap-1">
+                     <SignalPill signal={row.signal} />
+                     {row.noTradeZone?.active && <span className="px-2 py-0.5 rounded text-[10px] bg-orange-900 text-orange-300">⚠️ NTZ</span>}
+                     {zone && <span className={`px-2 py-0.5 rounded text-[10px] ${zone.className}`}>{zone.label}</span>}
+                     {vix != null && <span className={`px-2 py-0.5 rounded text-[10px] ${vixBadgeClass(vixRegime)}`}>VIX {vix.toFixed(1)} {vixRegime}</span>}
+                    </div>
                     <div className="text-xs text-[var(--bf-muted)] mt-2">Str: {row.strength}%</div>
                   </div>
                 </div>

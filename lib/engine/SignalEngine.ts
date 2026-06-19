@@ -8,8 +8,12 @@
  * Each signal includes: entry, stop-loss, target, trailing-stop, confidence score.
  */
 
-import { getHistorical, fetchQuote, suggestOptionStrikes } from '../stockUtils';
+import { getHistorical, fetchQuote, suggestOptionStrikes, classifyVixRegime } from '../stockUtils';
 import { readOI } from './oiAnalysis';
+import { buildVolumeProfile } from './volumeProfile';
+
+const NO_TRADE_ZONE_PIVOT_TOLERANCE = 0.003; // 0.3% proximity to PP qualifies as NTZ chop
+const NTZ_EXTRA_CONFLUENCE = 2; // additional confluence needed to trade inside NTZ
 
 // ── Indicator helpers ─────────────────────────────────────────────────────────
 
@@ -646,6 +650,23 @@ export interface Signal {
   fnoRecommendation?: FnORecommendation | null;
   strongSupport?: Array<{level: number; confidence: number; touches: number; age: number}>;
   strongResistance?: Array<{level: number; confidence: number; touches: number; age: number}>;
+  noTradeZone?: {
+    active: boolean;
+    s1: number;
+    r1: number;
+    pp: number;
+    reason: string;
+  };
+  volumeProfile?: {
+    poc: number;
+    vah: number;
+    val: number;
+    aboveValueArea: boolean;
+    belowValueArea: boolean;
+    atPOC: boolean;
+  };
+  vix?: number;
+  vixRegime?: string;
 }
 
 export interface FnORecommendation {
@@ -660,6 +681,10 @@ export interface FnORecommendation {
 // ── Main signal generator ─────────────────────────────────────────────────────
 
 export async function generateSignal(symbol: string): Promise<Signal> {
+  const indiaVixPromise = import('../stockUtils')
+    .then(({ fetchIndiaVIX }) => fetchIndiaVIX())
+    .catch(() => 15);
+
   const [histRaw, liveQuoteEarly] = await Promise.all([
     getHistorical(symbol, undefined, undefined, '1d'),
     fetchQuote(symbol),
@@ -766,9 +791,27 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   const obvArr = obv(closes, volumes);
   const obvSlope = obvArr[n - 1] - obvArr[Math.max(0, n - 6)];
 
+  // ── Volume Profile ───────────────────────────────────────────────────────
+  // Use last 60 bars for profile (approx 3 months of daily data)
+  const vpBars = Math.min(closes.length, 60);
+  const vp = buildVolumeProfile(
+    highs.slice(-vpBars),
+    lows.slice(-vpBars),
+    closes.slice(-vpBars),
+    volumes.slice(-vpBars),
+    30
+  );
+
   // ── Support & Resistance levels ───────────────────────────────────────────
   const sr = findSupportResistance(lastClose, highs, lows, closes);
   const { pivots, fibs, resistanceLevels, supportLevels } = sr;
+  // ── No-Trade Zone Detection ─────────────────────────────────────────────
+  const inNoTradeZone = (
+    lastClose >= pivots.s1 &&
+    lastClose <= pivots.r1 &&
+    Math.abs(lastClose - pivots.pp) / pivots.pp < NO_TRADE_ZONE_PIVOT_TOLERANCE &&
+    adxVal < 20
+  );
   const nearestResistance = resistanceLevels[0] ?? null;
   const nearestSupport = supportLevels[0] ?? null;
 
@@ -929,6 +972,25 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (lastClose > vwapVal) { bullScore += 1; reasons.push('Above VWAP'); }
   if (lastClose < vwapVal) { bearScore += 1; reasons.push('Below VWAP'); }
 
+  // Volume Profile scoring
+  if (vp.atPOC) {
+    reasons.push(`At Volume POC(₹${round(vp.poc)}) — mean reversion likely`);
+    if (bullScore > bearScore) bullScore -= 1;
+    else if (bearScore > bullScore) bearScore -= 1;
+  } else if (vp.aboveValueArea) {
+    bullScore += 2;
+    reasons.push(`Above Value Area (VAH:₹${round(vp.vah)}) — institutional bull breakout`);
+  } else if (vp.belowValueArea) {
+    bearScore += 2;
+    reasons.push(`Below Value Area (VAL:₹${round(vp.val)}) — institutional bear breakdown`);
+  } else if (vp.nearVAH) {
+    bearScore += 1;
+    reasons.push(`Near VAH(₹${round(vp.vah)}) resistance`);
+  } else if (vp.nearVAL) {
+    bullScore += 1;
+    reasons.push(`Near VAL(₹${round(vp.val)}) support`);
+  }
+
   // 8. OBV momentum
   if (obvSlope > 0) { bullScore += 1; reasons.push('OBV rising'); }
   if (obvSlope < 0) { bearScore += 1; reasons.push('OBV falling'); }
@@ -1062,13 +1124,25 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     reasons.push(`At Gann² resistance ₹${round(sq9.sqResistance)}`);
   }
 
-  // 11. Pivot point position
-  if (lastClose > pivots.pp) {
+  // 11. Pivot Zone Scoring (R2/R1/PP/S1/S2 zones)
+  if (lastClose >= pivots.r2) {
+    bearScore += 2;
+    reasons.push(`Extended above R2(₹${round(pivots.r2)}) — overbought zone`);
+  } else if (lastClose >= pivots.r1) {
+    bullScore += 2;
+    reasons.push(`Between R1(₹${round(pivots.r1)}) and R2(₹${round(pivots.r2)}) — bullish zone`);
+  } else if (lastClose > pivots.pp) {
     bullScore += 1;
-    reasons.push(`Above pivot (₹${round(pivots.pp)})`);
-  } else {
+    reasons.push(`Above pivot(₹${round(pivots.pp)}) toward R1(₹${round(pivots.r1)})`);
+  } else if (lastClose > pivots.s1) {
     bearScore += 1;
-    reasons.push(`Below pivot (₹${round(pivots.pp)})`);
+    reasons.push(`Below pivot(₹${round(pivots.pp)}) toward S1(₹${round(pivots.s1)})`);
+  } else if (lastClose >= pivots.s2) {
+    bearScore += 2;
+    reasons.push(`Between S2(₹${round(pivots.s2)}) and S1(₹${round(pivots.s1)}) — bearish zone`);
+  } else {
+    bearScore += 3;
+    reasons.push(`Below S2(₹${round(pivots.s2)}) — oversold/exhaustion zone`);
   }
 
   // 16. Prior-day high / low — every floor trader watches these.
@@ -1228,6 +1302,16 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     reasons.push('VETO: SELL blocked — price above VWAP & EMA21 on a green day');
   }
 
+  // NTZ VETO: In choppy/pivot zone, require elevated confluence
+  if (inNoTradeZone && signal !== 'HOLD') {
+    if (Math.abs(netScore) < minConfluence + NTZ_EXTRA_CONFLUENCE) {
+      signal = 'HOLD';
+      reasons.push(`NTZ: No-Trade Zone (S1:₹${round(pivots.s1)}–R1:₹${round(pivots.r1)}, ADX:${adxVal.toFixed(1)}) — elevated confluence required`);
+    } else {
+      reasons.push(`NTZ OVERRIDE: Strong signal despite No-Trade Zone (score:${netScore})`);
+    }
+  }
+
   // EXIT signal: counter-trend trigger when in position context
   if (signal === 'BUY' && rsiVal > 75 && macdHist < macdHistPrev) signal = 'EXIT';
   if (signal === 'SELL' && rsiVal < 25 && macdHist > macdHistPrev) signal = 'EXIT';
@@ -1292,6 +1376,8 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   // ── Strength & confidence ─────────────────────────────────────────────────
   const strength = Math.min(100, Math.round((Math.abs(netScore) / Math.max(totalVotes, 1)) * 100));
   const confidence = Math.min(1.0, Math.abs(netScore) / 10);
+  const currentVIX = await indiaVixPromise;
+  const vixRegime = classifyVixRegime(currentVIX);
 
   // ── F&O recommendation ────────────────────────────────────────────────────
   let fnoRec: FnORecommendation | null = null;
@@ -1299,7 +1385,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     // Let suggestOptionStrikes resolve the correct NSE strike step
     // (price-tiered for stocks, fixed per-index otherwise) and the
     // appropriate expiry (weekly for indices, monthly for stocks).
-    const strikesData = await suggestOptionStrikes(symbol, entryPrice, undefined, 2);
+    const strikesData = await suggestOptionStrikes(symbol, entryPrice, undefined, 2, currentVIX);
     const strikesList: number[] = (strikesData && 'strikes' in strikesData) ? strikesData.strikes as number[] : [];
     const atm: number = (strikesData && 'atm' in strikesData) ? strikesData.atm as number : entryPrice;
     const atmIdx = strikesList.indexOf(atm) >= 0 ? strikesList.indexOf(atm) : Math.floor(strikesList.length / 2);
@@ -1331,6 +1417,32 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   if (strongestResistance) {
     reasons.push(`💪 STRONG Resistance: ₹${round(strongestResistance.level)} (${strongestResistance.touches} touches, ${strongestResistance.age}d old, ${Math.round(strongestResistance.confidence * 100)}% confidence)`);
   }
+
+  const noTradeZoneReason = inNoTradeZone
+    ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} - choppy zone`
+    : 'Not in No-Trade Zone';
+  const noTradeZoneData = {
+    active: inNoTradeZone,
+    s1: pivots.s1,
+    r1: pivots.r1,
+    pp: pivots.pp,
+    reason: noTradeZoneReason
+  };
+  const noTradeZoneIndicator = {
+    active: inNoTradeZone,
+    s1: round(pivots.s1),
+    r1: round(pivots.r1),
+    pp: round(pivots.pp),
+    reason: noTradeZoneReason
+  };
+  const volumeProfileData = {
+    poc: round(vp.poc),
+    vah: round(vp.vah),
+    val: round(vp.val),
+    aboveValueArea: vp.aboveValueArea,
+    belowValueArea: vp.belowValueArea,
+    atPOC: vp.atPOC,
+  };
 
   return {
     symbol,
@@ -1373,11 +1485,19 @@ export async function generateSignal(symbol: string): Promise<Signal> {
             sqResistance: round(sq9.sqResistance),
           }
         : null,
+      volumeProfile: volumeProfileData,
+      noTradeZone: noTradeZoneIndicator,
+      indiaVIX: round(currentVIX),
+      vixRegime,
     },
     timestamp: new Date().toISOString(),
     fnoRecommendation: fnoRec,
     strongSupport: strongSR.strongSupport,
     strongResistance: strongSR.strongResistance,
+    noTradeZone: noTradeZoneData,
+    volumeProfile: volumeProfileData,
+    vix: currentVIX,
+    vixRegime,
   };
 }
 
