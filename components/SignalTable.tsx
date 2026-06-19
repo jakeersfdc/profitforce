@@ -14,6 +14,18 @@ type Signal = {
   strength: number;
   confidence?: number;
   reason: string;
+  indicators?: {
+    roc?: number;
+    stochRSI?: { k?: number; d?: number };
+    ichimoku?: {
+      aboveCloud?: boolean;
+      belowCloud?: boolean;
+      inCloud?: boolean;
+      bullCloud?: boolean;
+      tkBullCross?: boolean;
+      tkBearCross?: boolean;
+    };
+  };
   fnoRecommendation?: { type: string; strike?: number | null; reason?: string } | null;
   strongSupport?: Array<{level: number; confidence: number; touches: number; age: number}>;
   strongResistance?: Array<{level: number; confidence: number; touches: number; age: number}>;
@@ -36,22 +48,112 @@ function SignalPill({ signal }: { signal: Signal["signal"] }) {
   return <span className={`px-2 py-1 text-xs rounded-md font-semibold ${map[signal] ?? 'bg-gray-500 text-white'}`}>{signal}</span>;
 }
 
+type ReasonChip = { text: string; tone: "bull" | "bear" | "neutral"; icon: string };
+
+function splitReasons(reason: string): string[] {
+  return reason.split("|").map(r => r.trim()).filter(Boolean);
+}
+
+function reasonTone(text: string): "bull" | "bear" | "neutral" {
+  const lower = text.toLowerCase();
+  if (/bull|buy|oversold|above|breakout|support|positive|rising|golden|uptrend/.test(lower)) return "bull";
+  if (/bear|sell|overbought|below|breakdown|resistance|negative|falling|death|downtrend/.test(lower)) return "bear";
+  return "neutral";
+}
+
+function reasonIcon(text: string): string {
+  if (/stochrsi/i.test(text)) return "📈";
+  if (/ichimoku|cloud/i.test(text)) return "☁️";
+  if (/macd/i.test(text)) return "📊";
+  if (/roc/i.test(text)) return "⚡";
+  if (/rsi/i.test(text)) return "🧭";
+  if (/trend|ema|vwap/i.test(text)) return "📉";
+  return "•";
+}
+
+function reasonPriority(text: string): number {
+  if (/StochRSI|Ichimoku|ROC|MACD/i.test(text)) return 0;
+  if (/Trend|EMA|VWAP|RSI/i.test(text)) return 1;
+  if (/S:|R:|STRONG|Reversal-Score/i.test(text)) return 3;
+  return 2;
+}
+
+function topReasonChips(reason: string, limit = 3): ReasonChip[] {
+  return splitReasons(reason)
+    .sort((a, b) => reasonPriority(a) - reasonPriority(b))
+    .slice(0, limit)
+    .map(text => ({ text, tone: reasonTone(text), icon: reasonIcon(text) }));
+}
+
+function plainSignalExplanation(signal: Signal["signal"], reason: string): string {
+  const reasons = splitReasons(reason);
+  const bulls = reasons.filter(r => reasonTone(r) === "bull").slice(0, 2);
+  const bears = reasons.filter(r => reasonTone(r) === "bear").slice(0, 2);
+  if (signal === "BUY") return `🟢 Buy — ${bulls.length ? bulls.join("; ") : "Bullish momentum and trend are aligned"}`;
+  if (signal === "SELL") return `🔴 Sell — ${bears.length ? bears.join("; ") : "Bearish momentum and trend are aligned"}`;
+  if (signal === "EXIT") return "🟡 Exit — Momentum reversing, take profit/cut loss";
+  return "⚪ Hold — Market choppy, waiting for clearer setup";
+}
+
+function rocFromSignal(s: Signal): number {
+  if (typeof s.indicators?.roc === "number") return s.indicators.roc;
+  const m = s.reason.match(/ROC[^-\d]*(-?\d+(?:\.\d+)?)/i);
+  return m ? Number(m[1]) : 0;
+}
+
 function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesData; parentSignal: Signal }) {
   const { strikes, recommendation } = strikesData;
   const strikesList = strikes?.strikes ?? [];
   const atm = strikes?.atm ?? 0;
-  const tick = strikes?.tick ?? 50;
   const underlyingPrice = strikes?.price ?? parentSignal.currentPrice ?? parentSignal.entryPrice ?? 0;
   const rec = recommendation;
   const isBull = parentSignal.signal === 'BUY';
   const isBear = parentSignal.signal === 'SELL';
   const isExit = parentSignal.signal === 'EXIT';
+  const reasonChips = topReasonChips(parentSignal.reason, 3);
+  const signalExplanation = plainSignalExplanation(parentSignal.signal, parentSignal.reason);
+  const roc = rocFromSignal(parentSignal);
+  const rocClamped = Math.max(-3, Math.min(3, roc));
+  const rocNeedle = ((rocClamped + 3) / 6) * 100;
+  const stochK = parentSignal.indicators?.stochRSI?.k ?? null;
+  const stochD = parentSignal.indicators?.stochRSI?.d ?? null;
+  const hasBullCross = /StochRSI bull cross/i.test(parentSignal.reason);
+  const hasBearCross = /StochRSI bear cross/i.test(parentSignal.reason);
+  const stochState = stochK == null
+    ? "Neutral"
+    : stochK < 20
+      ? "Oversold"
+      : stochK > 80
+        ? "Overbought"
+        : hasBullCross
+          ? "↑ Cross"
+          : hasBearCross
+            ? "↓ Cross"
+            : "Neutral";
+  const stochStateClass = stochState === "Oversold"
+    ? "text-emerald-300"
+    : stochState === "Overbought"
+      ? "text-rose-300"
+      : stochState.includes("Cross")
+        ? "text-sky-300"
+        : "text-gray-300";
+  const ichi = parentSignal.indicators?.ichimoku;
+  const ichiView = ichi?.inCloud
+    ? { label: "☁️🟡 In Cloud", className: "bg-amber-900/40 text-amber-300 border border-amber-700/50" }
+    : ichi?.aboveCloud && ichi?.bullCloud
+      ? { label: "☁️🟢 Above Bull Cloud", className: "bg-emerald-900/40 text-emerald-300 border border-emerald-700/50" }
+      : ichi?.belowCloud && !ichi?.bullCloud
+        ? { label: "☁️🔴 Below Bear Cloud", className: "bg-rose-900/40 text-rose-300 border border-rose-700/50" }
+        : ichi?.aboveCloud
+          ? { label: "☁️⚪ Above Bear Cloud", className: "bg-lime-900/30 text-lime-200 border border-lime-700/40" }
+          : ichi?.belowCloud
+            ? { label: "☁️⚪ Below Bull Cloud", className: "bg-rose-900/20 text-rose-200 border border-rose-700/40" }
+            : { label: "☁️⚪ Cloud Data N/A", className: "bg-white/5 text-gray-300 border border-white/10" };
 
   // Compute buy/sell/exit prices for each strike based on ATR-derived levels
   const entryP = Number(parentSignal.entryPrice ?? 0);
   const stopP = Number(parentSignal.stopLoss ?? 0);
   const targetP = Number(parentSignal.targetPrice ?? 0);
-  const atr = entryP && stopP ? Math.abs(entryP - stopP) / 1.5 : tick; // reverse-engineer ATR from stop
 
   return (
     <div className="bg-[#0b1628] border border-white/10 rounded-lg p-4 space-y-3">
@@ -65,6 +167,7 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
           <div className="text-sm text-[var(--bf-muted)]">
             {rec?.type === 'HOLD' ? 'No F&O action recommended' : `${rec?.type?.replace('_', ' ')} @ Strike ₹${rec?.strike?.toLocaleString() ?? '—'}`}
           </div>
+          <div className="text-xs mt-1 text-white/80">{signalExplanation}</div>
         </div>
         <div className="text-right text-sm">
           <div className="text-[var(--bf-muted)]">Underlying</div>
@@ -161,6 +264,47 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
         </div>
       )}
 
+      <div className="space-y-3 border-t border-white/10 pt-3">
+        <div className="space-y-2">
+          <div className="text-xs uppercase tracking-wide text-[var(--bf-muted)]">Signal Reason Summary</div>
+          <div className="flex flex-wrap gap-2">
+            {reasonChips.map((chip, idx) => (
+              <span
+                key={`${chip.text}-${idx}`}
+                className={`px-2 py-1 rounded-md text-xs ${
+                  chip.tone === "bull"
+                    ? "bg-emerald-900/50 text-emerald-200 border border-emerald-700/40"
+                    : chip.tone === "bear"
+                      ? "bg-rose-900/50 text-rose-200 border border-rose-700/40"
+                      : "bg-white/5 text-gray-200 border border-white/10"
+                }`}
+              >
+                {chip.icon} {chip.text}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs uppercase tracking-wide text-[var(--bf-muted)]">Momentum Bar (ROC)</div>
+          <div className="relative h-3 rounded-full overflow-hidden bg-white/10">
+            <div className="absolute inset-y-0 left-0 w-1/2 bg-rose-600/70" />
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-emerald-600/70" />
+            <div className="absolute inset-y-0 left-1/2 w-px bg-white/70" />
+            <div className="absolute top-0 bottom-0 w-0.5 bg-white" style={{ left: `${rocNeedle}%` }} />
+          </div>
+          <div className="text-xs text-[var(--bf-muted)]">ROC: {roc.toFixed(2)}% (−3% to +3% scale)</div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <span className={`px-2 py-1 rounded-md text-xs font-medium ${ichiView.className}`}>{ichiView.label}</span>
+          <span className="px-2 py-1 rounded-md text-xs bg-white/5 border border-white/10">
+            StochRSI K:{stochK != null ? stochK.toFixed(1) : "—"} D:{stochD != null ? stochD.toFixed(1) : "—"}{" "}
+            <span className={`font-semibold ${stochStateClass}`}>{stochState}</span>
+          </span>
+        </div>
+      </div>
+
       {/* Risk/Reward Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 border-t border-white/5 pt-3">
         <div className="text-center">
@@ -187,35 +331,36 @@ function StrikeChildTable({ strikesData, parentSignal }: { strikesData: StrikesD
 
       {/* Reason */}
       <div className="text-xs text-[var(--bf-muted)] border-t border-white/5 pt-2">
-        <span className="font-semibold">Reason:</span> {parentSignal.reason}
+        <span className="font-semibold">Reason:</span>{" "}
+        {reasonChips.map(chip => chip.text).join(" • ")}
       </div>
 
       {/* Strong Institutional S/R Levels */}
-      {((parentSignal.strongSupport as any)?.length > 0 || (parentSignal.strongResistance as any)?.length > 0) && (
+      {(parentSignal.strongSupport?.length || parentSignal.strongResistance?.length) ? (
         <div className="text-xs text-white/70 border-t border-white/5 pt-2 mt-2 space-y-1">
           <div className="font-semibold text-[var(--bf-accent-blue)]">💪 Institutional Levels (1+ Month):</div>
-          {(parentSignal.strongSupport as any)?.length > 0 && (
+          {parentSignal.strongSupport?.length ? (
             <div className="pl-3">
               <div className="text-[#22c55e]">Support:</div>
-              {parentSignal.strongSupport!.slice(0, 3).map((s: any, i: number) => (
+              {parentSignal.strongSupport.slice(0, 3).map((s, i) => (
                 <div key={i} className="ml-2 text-xs text-[#10b981]">
                   ₹{s.level.toFixed(2)} • {s.touches} touches • {s.confidence}% strength
                 </div>
               ))}
             </div>
-          )}
-          {(parentSignal.strongResistance as any)?.length > 0 && (
+          ) : null}
+          {parentSignal.strongResistance?.length ? (
             <div className="pl-3">
               <div className="text-[#ef4444]">Resistance:</div>
-              {parentSignal.strongResistance!.slice(0, 3).map((r: any, i: number) => (
+              {parentSignal.strongResistance.slice(0, 3).map((r, i) => (
                 <div key={i} className="ml-2 text-xs text-[#f87171]">
                   ₹{r.level.toFixed(2)} • {r.touches} touches • {r.confidence}% strength
                 </div>
               ))}
             </div>
-          )}
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -290,7 +435,12 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
                       <div className="text-xs text-[var(--bf-muted)]">{row.name}</div>
                     </td>
                     <td className="px-4 py-3 text-right font-semibold">{row.currentPrice != null ? Number(row.currentPrice).toFixed(2) : '—'}</td>
-                    <td className="px-4 py-3 text-center"><SignalPill signal={row.signal} /></td>
+                    <td className="px-4 py-3 text-center">
+                      <SignalPill signal={row.signal} />
+                      <div className="text-[10px] text-[var(--bf-muted)] mt-1 whitespace-normal max-w-[200px] mx-auto">
+                        {plainSignalExplanation(row.signal, row.reason)}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-right font-medium text-emerald-400">{row.entryPrice != null ? Number(row.entryPrice).toFixed(2) : '—'}</td>
                     <td className="px-4 py-3 text-right font-medium text-rose-400">{row.stopLoss != null ? Number(row.stopLoss).toFixed(2) : '—'}</td>
                     <td className="px-4 py-3 text-right font-medium text-sky-400">{row.targetPrice != null ? Number(row.targetPrice).toFixed(2) : '—'}</td>
@@ -349,7 +499,9 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
                       <span className={`inline-block mr-2 text-xs transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▶</span>
                       {row.symbol} <span className="text-xs text-[var(--bf-muted)]">› {row.name}</span>
                     </div>
-                    <div className="text-xs text-[var(--bf-muted)] mt-1 line-clamp-1">{row.reason}</div>
+                    <div className="text-xs text-[var(--bf-muted)] mt-1 line-clamp-1">
+                      {topReasonChips(row.reason, 2).map(chip => chip.text).join(" • ")}
+                    </div>
                     <div className="mt-2 grid grid-cols-3 gap-3 text-xs">
                       <div><div className="text-[var(--bf-muted)]">Entry</div><div className="font-medium text-emerald-400">{row.entryPrice != null ? Number(row.entryPrice).toFixed(2) : '—'}</div></div>
                       <div><div className="text-[var(--bf-muted)]">Stop Loss</div><div className="font-medium text-rose-400">{row.stopLoss != null ? Number(row.stopLoss).toFixed(2) : '—'}</div></div>
@@ -369,6 +521,9 @@ export default function SignalTable({ data, loading, onSelect }: { data: Signal[
                   <div className="text-right">
                     <div className="font-semibold">{row.currentPrice != null ? Number(row.currentPrice).toFixed(2) : '0.00'}</div>
                     <div className="mt-2 text-right"><SignalPill signal={row.signal} /></div>
+                    <div className="text-[10px] text-[var(--bf-muted)] mt-1 max-w-[180px] text-right">
+                      {plainSignalExplanation(row.signal, row.reason)}
+                    </div>
                     <div className="text-xs text-[var(--bf-muted)] mt-2">Str: {row.strength}%</div>
                   </div>
                 </div>
