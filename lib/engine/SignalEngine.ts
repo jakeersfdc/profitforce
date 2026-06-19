@@ -1416,7 +1416,7 @@ export async function generateSignal(symbol: string): Promise<Signal> {
   }
 
   const noTradeZoneReason = inNoTradeZone
-    ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} — choppy zone`
+    ? `Price between S1(${round(pivots.s1)}) and R1(${round(pivots.r1)}), ADX=${adxVal.toFixed(1)} - choppy zone`
     : 'Not in No-Trade Zone';
   const noTradeZoneData = {
     active: inNoTradeZone,
