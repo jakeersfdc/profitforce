@@ -4,7 +4,7 @@
  *   RSI(14), MACD(12,26,9), Bollinger Bands(20,2), VWAP, EMA(9/21/50/200),
  *   SuperTrend(10,3), ADX(14), ATR(14), Volume Profile, OBV
  *
- * Signals are generated only when 3+ indicators agree (confluence).
+ * Signals are generated only when 4+ indicators agree (confluence).
  * Each signal includes: entry, stop-loss, target, trailing-stop, confidence score.
  */
 
@@ -208,6 +208,125 @@ function rsi(closes: number[], period = 14): (number | null)[] {
     }
   }
   return result;
+}
+
+/**
+ * Stochastic RSI — applies Stochastic formula to RSI values.
+ * Period: 14 RSI, 14 Stoch window, 3 smooth-K, 3 smooth-D
+ */
+function stochasticRSI(
+  closes: number[],
+  rsiPeriod = 14,
+  stochPeriod = 14,
+  smoothK = 3,
+  smoothD = 3
+): { k: number; d: number; prevK: number; prevD: number } {
+  const isNumber = (v: number | null): v is number => typeof v === 'number';
+  const rsiValues = rsi(closes, rsiPeriod).filter(isNumber);
+  if (rsiValues.length < stochPeriod) return { k: 50, d: 50, prevK: 50, prevD: 50 };
+
+  const rawK: number[] = [];
+  for (let i = stochPeriod - 1; i < rsiValues.length; i++) {
+    const slice = rsiValues.slice(i - stochPeriod + 1, i + 1);
+    const lowestRSI = Math.min(...slice);
+    const highestRSI = Math.max(...slice);
+    const range = highestRSI - lowestRSI;
+    rawK.push(range === 0 ? 50 : ((rsiValues[i] - lowestRSI) / range) * 100);
+  }
+
+  const smoothKArr = sma(rawK, smoothK);
+  const validK = smoothKArr.filter(v => v !== null) as number[];
+  const dArr = sma(validK, smoothD);
+  const validD = dArr.filter(v => v !== null) as number[];
+
+  const lastK = validK[validK.length - 1] ?? 50;
+  const lastD = validD[validD.length - 1] ?? 50;
+  const prevK = validK[validK.length - 2] ?? lastK;
+  const prevD = validD[validD.length - 2] ?? lastD;
+
+  return { k: lastK, d: lastD, prevK, prevD };
+}
+
+interface IchimokuResult {
+  tenkan: number;
+  kijun: number;
+  spanA: number;
+  spanB: number;
+  aboveCloud: boolean;
+  belowCloud: boolean;
+  inCloud: boolean;
+  tkBullCross: boolean;
+  tkBearCross: boolean;
+  bullCloud: boolean;
+  chikouAbove: boolean;
+}
+
+function ichimoku(highs: number[], lows: number[], closes: number[]): IchimokuResult {
+  const n = closes.length;
+  if (!n) {
+    return {
+      tenkan: 0,
+      kijun: 0,
+      spanA: 0,
+      spanB: 0,
+      aboveCloud: false,
+      belowCloud: false,
+      inCloud: true,
+      tkBullCross: false,
+      tkBearCross: false,
+      bullCloud: false,
+      chikouAbove: false,
+    };
+  }
+  const midpoint = (h: number[], l: number[], period: number, idx: number): number => {
+    const safeIdx = Math.max(0, idx);
+    const sliceH = h.slice(Math.max(0, safeIdx - period + 1), safeIdx + 1);
+    const sliceL = l.slice(Math.max(0, safeIdx - period + 1), safeIdx + 1);
+    return (Math.max(...sliceH) + Math.min(...sliceL)) / 2;
+  };
+
+  const tenkan = midpoint(highs, lows, 9, n - 1);
+  const kijun = midpoint(highs, lows, 26, n - 1);
+  const prevTenkan = midpoint(highs, lows, 9, n - 2);
+  const prevKijun = midpoint(highs, lows, 26, n - 2);
+
+  const spanA = (tenkan + kijun) / 2;
+  const spanACurrent = n >= 27
+    ? (midpoint(highs, lows, 9, n - 27) + midpoint(highs, lows, 26, n - 27)) / 2
+    : spanA;
+  const spanBCurrent = n >= 27
+    ? midpoint(highs, lows, 52, n - 27)
+    : midpoint(highs, lows, 52, n - 1);
+
+  const cloudTop = Math.max(spanACurrent, spanBCurrent);
+  const cloudBottom = Math.min(spanACurrent, spanBCurrent);
+  const lastClose = closes[n - 1];
+  const chikouAbove = n >= 27 ? lastClose > closes[n - 27] : false;
+
+  return {
+    tenkan,
+    kijun,
+    spanA: spanACurrent,
+    spanB: spanBCurrent,
+    aboveCloud: lastClose > cloudTop,
+    belowCloud: lastClose < cloudBottom,
+    inCloud: lastClose >= cloudBottom && lastClose <= cloudTop,
+    tkBullCross: tenkan > kijun && prevTenkan <= prevKijun,
+    tkBearCross: tenkan < kijun && prevTenkan >= prevKijun,
+    bullCloud: spanACurrent > spanBCurrent,
+    chikouAbove,
+  };
+}
+
+/**
+ * Rate of Change (ROC) — measures momentum/velocity.
+ */
+function roc(closes: number[], period = 9): number {
+  const n = closes.length;
+  if (n <= period) return 0;
+  const past = closes[n - 1 - period];
+  if (past === 0) return 0;
+  return ((closes[n - 1] - past) / past) * 100;
 }
 
 function macd(closes: number[], fast = 12, slow = 26, signal = 9) {
@@ -765,6 +884,9 @@ export async function generateSignal(symbol: string): Promise<Signal> {
 
   const obvArr = obv(closes, volumes);
   const obvSlope = obvArr[n - 1] - obvArr[Math.max(0, n - 6)];
+  const stochRSIVal = stochasticRSI(closes);
+  const ichimokuVal = ichimoku(highs, lows, closes);
+  const rocVal = roc(closes, 9);
 
   // ── Support & Resistance levels ───────────────────────────────────────────
   const sr = findSupportResistance(lastClose, highs, lows, closes);
@@ -1109,10 +1231,69 @@ export async function generateSignal(symbol: string): Promise<Signal> {
     else reasons.push(`OI: NEUTRAL (PCR ${oi.pcr.toFixed(2)}, ${oi.buildup.toLowerCase().replace('_', ' ')})`);
   }
 
+  // 20. Stochastic RSI — faster than plain RSI, catches reversals earlier
+  if (stochRSIVal.k < 20 && stochRSIVal.d < 20) {
+    bullScore += 2;
+    reasons.push(`StochRSI oversold (K:${stochRSIVal.k.toFixed(1)} D:${stochRSIVal.d.toFixed(1)})`);
+  } else if (stochRSIVal.k > 80 && stochRSIVal.d > 80) {
+    bearScore += 2;
+    reasons.push(`StochRSI overbought (K:${stochRSIVal.k.toFixed(1)} D:${stochRSIVal.d.toFixed(1)})`);
+  } else if (stochRSIVal.k > stochRSIVal.d && stochRSIVal.prevK <= stochRSIVal.prevD && stochRSIVal.k < 80) {
+    bullScore += 1;
+    reasons.push(`StochRSI bull cross (K:${stochRSIVal.k.toFixed(1)} > D:${stochRSIVal.d.toFixed(1)})`);
+  } else if (stochRSIVal.k < stochRSIVal.d && stochRSIVal.prevK >= stochRSIVal.prevD && stochRSIVal.k > 20) {
+    bearScore += 1;
+    reasons.push(`StochRSI bear cross (K:${stochRSIVal.k.toFixed(1)} < D:${stochRSIVal.d.toFixed(1)})`);
+  }
+
+  // 21. Ichimoku Cloud — comprehensive trend context
+  if (ichimokuVal.aboveCloud && ichimokuVal.bullCloud) {
+    bullScore += 3;
+    reasons.push(`Ichimoku: Above bull cloud (T:${ichimokuVal.tenkan.toFixed(0)} K:${ichimokuVal.kijun.toFixed(0)})`);
+  } else if (ichimokuVal.aboveCloud && !ichimokuVal.bullCloud) {
+    bullScore += 1;
+    reasons.push('Ichimoku: Above cloud (bear cloud — weak bull)');
+  } else if (ichimokuVal.belowCloud && !ichimokuVal.bullCloud) {
+    bearScore += 3;
+    reasons.push(`Ichimoku: Below bear cloud (T:${ichimokuVal.tenkan.toFixed(0)} K:${ichimokuVal.kijun.toFixed(0)})`);
+  } else if (ichimokuVal.belowCloud && ichimokuVal.bullCloud) {
+    bearScore += 1;
+    reasons.push('Ichimoku: Below cloud (bull cloud — weak bear)');
+  } else if (ichimokuVal.inCloud) {
+    if (bullScore > bearScore) bullScore -= 1;
+    else if (bearScore > bullScore) bearScore -= 1;
+    reasons.push('Ichimoku: In cloud (indecision)');
+  }
+  if (ichimokuVal.tkBullCross) { bullScore += 2; reasons.push('Ichimoku: TK bull cross (Tenkan crossed above Kijun)'); }
+  if (ichimokuVal.tkBearCross) { bearScore += 2; reasons.push('Ichimoku: TK bear cross (Tenkan crossed below Kijun)'); }
+  if (ichimokuVal.chikouAbove) { bullScore += 1; reasons.push('Ichimoku: Chikou above price 26 bars ago'); }
+  else { bearScore += 1; reasons.push('Ichimoku: Chikou below price 26 bars ago'); }
+
+  // 22. ROC — momentum confirmation
+  const lowMomentumThreshold = 0.2;
+  const rocAbs = Math.abs(rocVal);
+  if (rocVal > 1.5) {
+    bullScore += 2;
+    reasons.push(`ROC momentum strong bull (+${rocVal.toFixed(2)}%)`);
+  } else if (rocVal > 0.5) {
+    bullScore += 1;
+    reasons.push(`ROC bull momentum (+${rocVal.toFixed(2)}%)`);
+  } else if (rocVal < -1.5) {
+    bearScore += 2;
+    reasons.push(`ROC momentum strong bear (${rocVal.toFixed(2)}%)`);
+  } else if (rocVal < -0.5) {
+    bearScore += 1;
+    reasons.push(`ROC bear momentum (${rocVal.toFixed(2)}%)`);
+  } else {
+    reasons.push(`ROC flat (${rocVal.toFixed(2)}%) — low momentum`);
+    if (bullScore > bearScore && rocAbs < lowMomentumThreshold) bullScore -= 1;
+    if (bearScore > bullScore && rocAbs < lowMomentumThreshold) bearScore -= 1;
+  }
+
   // ── Determine signal ──────────────────────────────────────────────────────
   const netScore = bullScore - bearScore;
   const totalVotes = bullScore + bearScore;
-  const minConfluence = 3; // require 3+ indicator agreement for actionable signal
+  const minConfluence = 4; // require 4+ indicator agreement for actionable signal
 
   let signal: 'BUY' | 'SELL' | 'EXIT' | 'HOLD' = 'HOLD';
   if (netScore >= minConfluence) signal = 'BUY';
@@ -1353,6 +1534,20 @@ export async function generateSignal(symbol: string): Promise<Signal> {
       s1: round(pivots.s1), s2: round(pivots.s2), s3: round(pivots.s3),
       supportLevels: supportLevels.map(round),
       resistanceLevels: resistanceLevels.map(round),
+      stochRSI: { k: round(stochRSIVal.k), d: round(stochRSIVal.d) },
+      ichimoku: {
+        tenkan: round(ichimokuVal.tenkan),
+        kijun: round(ichimokuVal.kijun),
+        spanA: round(ichimokuVal.spanA),
+        spanB: round(ichimokuVal.spanB),
+        aboveCloud: ichimokuVal.aboveCloud,
+        belowCloud: ichimokuVal.belowCloud,
+        inCloud: ichimokuVal.inCloud,
+        bullCloud: ichimokuVal.bullCloud,
+        tkBullCross: ichimokuVal.tkBullCross,
+        tkBearCross: ichimokuVal.tkBearCross,
+      },
+      roc: round(rocVal),
       strongSupport: strongSR.strongSupport.map(s => ({ level: round(s.level), confidence: Math.round(s.confidence * 100), touches: s.touches, age: s.age })),
       strongResistance: strongSR.strongResistance.map(r => ({ level: round(r.level), confidence: Math.round(r.confidence * 100), touches: r.touches, age: r.age })),
       fibRetracement: {

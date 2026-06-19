@@ -169,6 +169,31 @@ export async function fetchGiftNifty() {
 
 export async function calculateAISignal(symbol: string) {
   try {
+    function calcEMA(values: number[], period: number): number[] {
+      const k = 2 / (period + 1);
+      const result = [values[0]];
+      for (let i = 1; i < values.length; i++) {
+        result.push(values[i] * k + result[i - 1] * (1 - k));
+      }
+      return result;
+    }
+
+    function calcRSI(closes: number[], period: number): number {
+      if (closes.length < period + 1) return 50;
+      let gains = 0;
+      let losses = 0;
+      const start = closes.length - period;
+      for (let i = start; i < closes.length; i++) {
+        const d = closes[i] - closes[i - 1];
+        if (d > 0) gains += d;
+        else losses -= d;
+      }
+      const avgGain = gains / period;
+      const avgLoss = losses / period;
+      if (avgLoss === 0) return 100;
+      return 100 - 100 / (1 + avgGain / avgLoss);
+    }
+
     // prefer using historical OHLC for indicator calculations
     const hist = await getHistorical(symbol, undefined, undefined, '1d');
     if (!Array.isArray(hist) || hist.length < 21) {
@@ -185,23 +210,16 @@ export async function calculateAISignal(symbol: string) {
     const highs: number[] = hist.map((h: any) => Number(h.high ?? 0));
     const lastClose = closes[closes.length - 1];
 
-    const ti = await import('technicalindicators');
-    const rsiArr: number[] = ti.RSI.calculate({ period: 14, values: closes });
-    const smaShortArr: number[] = ti.SMA.calculate({ period: 5, values: closes });
-    const smaLongArr: number[] = ti.SMA.calculate({ period: 20, values: closes });
+    const ema9Arr = calcEMA(closes, 9);
+    const ema21Arr = calcEMA(closes, 21);
+    const ema9 = ema9Arr[ema9Arr.length - 1];
+    const ema21 = ema21Arr[ema21Arr.length - 1];
+    const rsi9 = calcRSI(closes, 9);
+    const close3BarsAgo = closes[closes.length - 4];
+    const roc3 = close3BarsAgo ? ((lastClose - close3BarsAgo) / close3BarsAgo) * 100 : 0;
 
-    if (!rsiArr.length || smaShortArr.length < 2 || smaLongArr.length < 2) {
-      return { symbol, signal: 'HOLD', entryPrice: lastClose, stopLoss: null, targetPrice: null, strength: 30, reason: 'Insufficient indicator data' };
-    }
-
-    const rsi = rsiArr[rsiArr.length - 1];
-    const smaShort = smaShortArr[smaShortArr.length - 1];
-    const smaLong = smaLongArr[smaLongArr.length - 1];
-    const prevShort = smaShortArr[smaShortArr.length - 2];
-    const prevLong = smaLongArr[smaLongArr.length - 2];
-
-    const buySignal = (smaShort > smaLong && prevShort <= prevLong) || (rsi < 30);
-    const sellSignal = (smaShort < smaLong && prevShort >= prevLong) || (rsi > 70);
+    const buySignal = ema9 > ema21 && rsi9 >= 45 && rsi9 <= 70 && roc3 > 0;
+    const sellSignal = ema9 < ema21 && rsi9 >= 30 && rsi9 <= 55 && roc3 < 0;
 
     let signal = 'HOLD';
     if (buySignal) signal = 'BUY';
@@ -241,18 +259,9 @@ export async function calculateAISignal(symbol: string) {
       targetPrice = null;
     }
 
-    // simple strength metric combining RSI extremeness and SMA distance
-    const smaDist = Math.abs((smaShort - smaLong) / (smaLong || 1));
-    const strength = Math.min(100, Math.round(Math.abs(50 - rsi) + smaDist * 200));
-
-    const reasonParts = [];
-    reasonParts.push(`RSI:${rsi.toFixed(1)}`);
-    reasonParts.push(`SMA5:${smaShort.toFixed(2)}`);
-    reasonParts.push(`SMA20:${smaLong.toFixed(2)}`);
-    if (buySignal && rsi < 30) reasonParts.push('Oversold');
-    if (buySignal && smaShort > smaLong) reasonParts.push('SMA crossover up');
-    if (sellSignal && rsi > 70) reasonParts.push('Overbought');
-    if (sellSignal && smaShort < smaLong) reasonParts.push('SMA crossover down');
+    const emaDist = Math.abs((ema9 - ema21) / (ema21 || 1)) * 100;
+    const strength = Math.min(100, Math.round(Math.abs(roc3) * 8 + emaDist * 4 + Math.abs(rsi9 - 50)));
+    const reason = `EMA9:${ema9.toFixed(2)} EMA21:${ema21.toFixed(2)} RSI9:${rsi9.toFixed(1)} ROC:${roc3.toFixed(2)}%`;
 
     return {
       symbol,
@@ -261,7 +270,7 @@ export async function calculateAISignal(symbol: string) {
       stopLoss,
       targetPrice,
       strength,
-      reason: reasonParts.join(' | '),
+      reason,
     };
   } catch (error) {
     console.error('calculateAISignal error', error);
