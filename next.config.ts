@@ -59,6 +59,21 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [
+          {
+            type: "host",
+            value: "profitforce.com",
+          },
+        ],
+        destination: "https://profitforce.vercel.app/:path*",
+        permanent: false,
+      },
+    ];
+  },
   async rewrites() {
     const inferenceUrl = process.env.INFERENCE_URL;
     if (!inferenceUrl) return [];

@@ -5,6 +5,19 @@
   "buildCommand": "npm run build",
   "installCommand": "npm install",
   "regions": ["bom1"],
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "profitforce.com"
+        }
+      ],
+      "destination": "https://profitforce.vercel.app/:path*",
+      "permanent": false
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
