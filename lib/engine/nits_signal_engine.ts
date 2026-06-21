@@ -111,7 +111,7 @@ export class NITSSignalEngine {
 
     return {
       symbol: 'NSE:NIFTY',
-      timestamp: currentCandle.time,
+      timestamp: typeof currentCandle.time === 'number' ? currentCandle.time : (currentCandle.time as Date).getTime(),
       signalStatus,
       marketBias,
       orbStatus,

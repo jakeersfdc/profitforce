@@ -4,7 +4,7 @@
  * Automatic 0-11 Point Signal Scoring System
  */
 
-import { OHLCV } from '../types';
+import { OHLCV } from './types';
 
 export interface SignalData {
   symbol: string;

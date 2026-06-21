@@ -5,8 +5,39 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+interface TradePosition {
+  id: string;
+  signalId: any;
+  symbol: string;
+  side: string;
+  entryPrice: number;
+  quantity: number;
+  entryTime: Date;
+  stopLoss: number;
+  target1: number;
+  target2: number;
+  target3: number;
+  status: string;
+  currentPrice: number;
+  unrealizedPnL: number;
+  exitPrice?: number;
+  exitTime?: Date;
+  exitReason?: string;
+  pnl?: number;
+}
+
+interface Portfolio {
+  cash: number;
+  positions: TradePosition[];
+  totalPnL: number;
+  totalTrades: number;
+  winRate: number;
+  openTrades: number;
+  maxDrawdown: number;
+}
+
 // In-memory paper trading state (replace with DB in production)
-let paperPortfolio = {
+let paperPortfolio: Portfolio = {
   cash: 100000,
   positions: [],
   totalPnL: 0,

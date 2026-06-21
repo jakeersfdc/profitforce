@@ -4,4 +4,4 @@
  * Redirects to /api/signals/timed
  */
 
-export { GET, POST } from '@/app/api/signals/timed/route';
+export { GET } from '@/app/api/signals/timed/route';

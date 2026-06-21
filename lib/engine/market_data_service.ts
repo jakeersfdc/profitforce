@@ -3,7 +3,7 @@
  * Fetches OHLCV data for real-time signal generation
  */
 
-import { OHLCV } from './engine/types';
+import { OHLCV } from './types';
 
 export interface DataSourceConfig {
   source: 'tradingview' | 'broker' | 'mock';

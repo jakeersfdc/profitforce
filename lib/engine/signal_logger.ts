@@ -42,7 +42,7 @@ export class SignalLogger {
   /**
    * Log a trade execution
    */
-  async logTrade(signalId: string, trade: Partial<TradeLog>): Promise<TradeLog> {
+  async logTrade(signalId: string, trade: TradeLog): Promise<TradeLog> {
     const query = `
       INSERT INTO trade_logs (
         signal_id, entry_time, entry_price, quantity, 
@@ -113,6 +113,15 @@ export class SignalLogger {
   async getStrategyStats(period: 'today' | 'week' | 'month' | 'all'): Promise<StrategyStats> {
     const dateFilter = this.getDateFilter(period);
     
+    // Map period to StrategyStats format
+    const periodMap: Record<string, 'daily' | 'weekly' | 'monthly'> = {
+      today: 'daily',
+      week: 'weekly',
+      month: 'monthly',
+      all: 'monthly'
+    };
+    const mappedPeriod = periodMap[period];
+    
     const query = `
       SELECT 
         COUNT(*) as total_signals,
@@ -133,20 +142,16 @@ export class SignalLogger {
     const stats = result.rows[0];
 
     return {
-      totalSignals: stats.total_signals,
-      buySignals: stats.buy_signals,
-      sellSignals: stats.sell_signals,
-      noTradeSignals: stats.no_trade_signals,
-      winRate: stats.success_trades > 0 ? (stats.success_trades / stats.total_trades) * 100 : 0,
-      avgWin: stats.total_wins > 0 ? stats.total_wins / stats.success_trades : 0,
-      avgLoss: stats.total_losses > 0 ? stats.total_losses / (stats.total_trades - stats.success_trades) : 0,
+      totalSignals: stats.total_signals || 0,
+      successfulTrades: stats.success_trades || 0,
+      failedTrades: (stats.total_trades || 0) - (stats.success_trades || 0),
+      winRate: stats.success_trades > 0 && stats.total_trades > 0 ? (stats.success_trades / stats.total_trades) * 100 : 0,
+      avgProfit: stats.total_wins > 0 && stats.success_trades > 0 ? stats.total_wins / stats.success_trades : 0,
+      avgLoss: stats.total_losses > 0 && stats.total_trades > stats.success_trades ? stats.total_losses / (stats.total_trades - stats.success_trades) : 0,
       profitFactor: stats.total_losses > 0 ? stats.total_wins / stats.total_losses : 0,
       totalPnL: stats.total_pnl || 0,
-      totalTrades: stats.total_trades,
-      maxDrawdown: 0, // TODO: Calculate
-      successTrades: stats.success_trades,
-      failedTrades: stats.total_trades - stats.success_trades,
-      period,
+      period: mappedPeriod,
+      lastUpdated: new Date(),
     };
   }
 
