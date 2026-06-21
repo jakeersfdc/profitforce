@@ -1,5 +1,5 @@
 /**
- * API Route: /api/signals/history
+ * API Route: /api/signals/history (also available at /api/history)
  * Get signal history and statistics
  */
 

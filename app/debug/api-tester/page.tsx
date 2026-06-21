@@ -80,7 +80,7 @@ export default function ApiTesterPage() {
         candles: JSON.parse(ohlcvData),
       };
 
-      const res = await fetch('/api/signals/v2.1', {
+      const res = await fetch('/api/v2.1', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -246,7 +246,7 @@ export default function ApiTesterPage() {
               <div>
                 <h3 className="font-semibold mb-2">Endpoint</h3>
                 <code className="bg-gray-100 p-2 rounded text-sm">
-                  POST /api/signals/v2.1
+                  POST /api/v2.1
                 </code>
               </div>
 

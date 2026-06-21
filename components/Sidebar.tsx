@@ -55,7 +55,7 @@ const navGroups: NavGroup[] = [
     items: [
       { name: "OMS", href: "/dashboard/oms", icon: Activity },
       { name: "Strategy Lab", href: "/dashboard/strategy", icon: FlaskConical },
-      { name: "v2.1 Signals", href: "/signals", icon: Zap },
+      { name: "v2.1 Signals", href: "/", icon: Zap },
       { name: "Watchlist", href: "/dashboard?view=stocks#watchlist", icon: Star },
       { name: "Brokers", href: "/dashboard?view=brokers", icon: Link2 },
       { name: "Profile", href: "/profile", icon: User },

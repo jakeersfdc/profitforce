@@ -1,5 +1,5 @@
 /**
- * API Route: /api/signals/nits
+ * API Route: /api/signals/nits (also available at /api/nits)
  * NIFTY Institutional Trading System signal endpoint
  */
 

@@ -1,5 +1,5 @@
 /**
- * API Route: /api/signals/v2.1
+ * API Route: /api/signals/v2.1 (also available at /api/v2.1)
  * Generate trading signals using v2.1 indicator system
  * POST - Generate signal from OHLCV data
  * GET - Return latest signal with auto-fetched data
@@ -79,7 +79,7 @@ export async function GET(req: NextRequest) {
 
     if (!lastSignal) {
       return NextResponse.json(
-        { error: 'No signal available. POST OHLCV data to /api/signals/v2.1' },
+        { error: 'No signal available. POST OHLCV data to /api/v2.1' },
         { status: 404 }
       );
     }

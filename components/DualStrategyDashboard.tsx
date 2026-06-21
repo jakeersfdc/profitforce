@@ -37,8 +37,8 @@ export default function DualStrategyDashboard() {
     try {
       setLoading(true);
       const [v21Res, nitsRes] = await Promise.all([
-        fetch('/api/signals/v2.1'),
-        fetch('/api/signals/nits'),
+        fetch('/api/v2.1'),
+        fetch('/api/nits'),
       ]);
 
       const v21Data = await v21Res.json();

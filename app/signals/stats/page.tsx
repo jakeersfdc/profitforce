@@ -61,7 +61,7 @@ export default function StrategyStatsPage() {
   const fetchStats = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/signals/history?action=stats&period=${period}`);
+      const res = await fetch(`/api/history?action=stats&period=${period}`);
       const data = await res.json();
 
       if (data.success) {

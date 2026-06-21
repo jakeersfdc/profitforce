@@ -13,7 +13,7 @@ export default function V2_1SignalDisplay() {
     const fetchSignal = async () => {
       try {
         setLoading(true);
-        const res = await fetch('/api/signals/v2.1');
+        const res = await fetch('/api/v2.1');
         if (!res.ok) throw new Error('Failed to fetch signal');
         const data = await res.json();
         setSignal(data.signal);

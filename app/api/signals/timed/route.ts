@@ -6,7 +6,7 @@ import {
 } from '../../../../lib/engine/TimedSignalScheduler';
 
 /**
- * GET /api/signals/timed
+ * GET /api/signals/timed (also available at /api/timed)
  * Returns high-confidence signals for the current market hour
  *
  * Query params:
@@ -47,7 +47,7 @@ export async function GET(req: Request) {
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
-    console.error('[/api/signals/timed] Error:', e);
+    console.error('[/api/timed] Error:', e);
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
 }

@@ -25,7 +25,7 @@ export default function SignalsHubPage() {
         {/* Header */}
         <div className="mb-8 border-b border-gray-800 pb-6">
           <h1 className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400">
-            Trading Signals Hub
+            Profitforce Trading
           </h1>
           <p className="text-gray-400 mt-2">
             Multi-strategy automated trading system with institutional-grade execution
@@ -131,7 +131,7 @@ export default function SignalsHubPage() {
               </p>
             </div>
             <div className="text-center py-12 text-gray-400">
-              NITS signals loading... (Fetch from /api/signals/nits)
+              NITS signals loading... (Fetch from /api/nits)
             </div>
           </TabsContent>
 
