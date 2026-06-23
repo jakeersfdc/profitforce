@@ -24,6 +24,7 @@ interface DemoTab {
 }
 
 export default function SASDemo() {
+  // SAS Trading System Demo - Professional Signals Dashboard v2.0
   const [activeTab, setActiveTab] = useState<'signals' | 'dashboard' | 'crypto' | 'details'>(
     'signals'
   );
